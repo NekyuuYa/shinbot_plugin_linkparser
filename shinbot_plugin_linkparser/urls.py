@@ -220,17 +220,71 @@ _ARK_URL_FIELDS = (
     "url",
     "mqqurl",
     "videoUrl",
-    "jumpUrl",
 )
 
+_ARK_META_FAMILIES = ("miniapp", "detail_1", "detail", "detail_2", "news", "link")
 
-def ark_extract_url(data: str | dict[str, Any] | None) -> str | None:
+_URL_PREFIXES = ("http://", "https://")
+_MAX_DECODE_DEPTH = 4
+
+
+def _decode_payload(data: object) -> object:
+    """Decode possibly double-encoded JSON card payloads.
+
+    The OneBot adapter stores card JSON with ``json.dumps`` on top of the
+    already-serialized card string, producing a JSON *string* whose value is
+    again JSON. Decode repeatedly (bounded) until a dict is reached or the
+    payload is no longer decodable JSON.
+    """
+    payload = data
+    for _ in range(_MAX_DECODE_DEPTH):
+        if not isinstance(payload, str):
+            return payload
+        try:
+            decoded = json.loads(payload)
+        except (ValueError, TypeError):
+            return payload
+        if isinstance(decoded, dict):
+            return decoded
+        payload = decoded
+    return payload
+
+
+def _url_candidates(payload: object) -> list[str]:
+    """Collect every http(s) URL string nested anywhere in the card JSON."""
+    found: list[str] = []
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, str):
+            if node.startswith(_URL_PREFIXES):
+                found.append(node)
+            continue
+        if isinstance(node, dict):
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+    return found
+
+
+def _prefer_bilibili(urls: list[str]) -> str | None:
+    """Return the first Bilibili-ish URL, falling back to the first URL."""
+    for url in urls:
+        if "bilibili.com" in url or "b23.tv" in url or re.search(r"/?BV[0-9A-Za-z]{10}", url):
+            return url
+    return urls[0] if urls else None
+
+
+def ark_extract_url(data: str | dict | None) -> str | None:
     """Extract the first usable URL from a QQ share-card JSON payload.
 
-    QQ JSON cards (OneBot ``json`` segment → ShinBot ``sb:ark`` element) nest
-    jump targets inside ``meta.miniapp`` / ``meta.detail_1`` / ``meta.news``
-    dictionaries. Priority is given to Bilibili-related URLs; otherwise the
-    first http(s) URL found is returned.
+    QQ cards (OneBot ``json`` segment → ShinBot ``sb:ark`` element) nest jump
+    targets inside ``meta.miniapp`` / ``meta.detail_1`` / ``meta.news`` etc.
+    The payload may be double-encoded by the adapter, which is handled here.
+
+    Priority:
+    1. Structured fields in astrbot-style priority order (Bilibili first).
+    2. Any http(s) URL found anywhere in the payload (Bilibili preferred).
 
     Args:
         data: The card payload: a JSON string or an already-parsed dict.
@@ -238,39 +292,31 @@ def ark_extract_url(data: str | dict[str, Any] | None) -> str | None:
     Returns:
         The extracted URL, or ``None`` when nothing usable is found.
     """
-    payload = data
-    if isinstance(payload, str):
-        try:
-            parsed = json.loads(payload)
-        except (ValueError, TypeError):
-            return None
-        payload = parsed
+    payload = _decode_payload(data)
     if not isinstance(payload, dict):
         return None
 
-    meta = payload.get("meta")
-    if not isinstance(meta, dict):
-        meta = {}
-
     urls: list[str] = []
-    for family in ("miniapp", "detail_1", "detail_2", "news", "link"):
-        node = meta.get(family)
-        if not isinstance(node, dict):
-            continue
-        for key in _ARK_URL_FIELDS:
-            value = node.get(key)
-            if isinstance(value, str) and value.startswith(("http://", "https://")):
-                urls.append(value)
+    meta = payload.get("meta")
+    if isinstance(meta, dict):
+        for family in _ARK_META_FAMILIES:
+            node = meta.get(family)
+            if not isinstance(node, dict):
+                continue
+            for key in _ARK_URL_FIELDS:
+                value = node.get(key)
+                if isinstance(value, str) and value.startswith(_URL_PREFIXES):
+                    urls.append(value)
     # Some cards place jump URLs at the top level of the payload.
-    for key in ("url", "jumpUrl", "qqdocurl", "link", "shareUrl"):
+    for key in ("url", "jumpUrl", "qqdocurl", "link", "shareUrl", "sourceUrl"):
         value = payload.get(key)
-        if isinstance(value, str) and value.startswith(("http://", "https://")):
+        if isinstance(value, str) and value.startswith(_URL_PREFIXES):
             urls.append(value)
 
-    for url in urls:
-        if "bilibili.com" in url or "b23.tv" in url or re.search(r"/?BV[0-9A-Za-z]{10}", url):
-            return url
-    return urls[0] if urls else None
+    structured = _prefer_bilibili(urls)
+    if structured is not None:
+        return structured
+    return _prefer_bilibili(_url_candidates(payload))
 
 
 # ── Message element scanning (duck-typed) ────────────────────────────────

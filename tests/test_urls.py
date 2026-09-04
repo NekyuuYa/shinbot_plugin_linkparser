@@ -108,6 +108,65 @@ def test_ark_extract_falls_back_to_any_url() -> None:
     assert ark_extract_url(json.dumps(payload)) == "https://example.com/abc"
 
 
+def test_ark_extract_structmsg_news_card() -> None:
+    """QQ 'com.tencent.structmsg' share card nests the URL in meta.news."""
+    payload = {
+        "app": "com.tencent.structmsg",
+        "view": "news",
+        "meta": {
+            "news": {
+                "title": "标题",
+                "qqdocurl": "https://www.bilibili.com/video/BV1xx411c7mD",
+            }
+        },
+    }
+    assert ark_extract_url(json.dumps(payload)) == (
+        "https://www.bilibili.com/video/BV1xx411c7mD"
+    )
+
+
+def test_ark_extract_meta_detail_family() -> None:
+    """Some cards use meta.detail (no suffix) with shareUrl."""
+    payload = {
+        "meta": {
+            "detail": {
+                "shareUrl": "https://b23.tv/abCdEf",
+            }
+        },
+    }
+    assert ark_extract_url(json.dumps(payload)) == "https://b23.tv/abCdEf"
+
+
+def test_ark_extract_double_encoded_onebot_payload() -> None:
+    """The OneBot adapter json.dumps the already-serialized card string once
+    more, so sb:ark attrs.data arrives double-encoded. Must still resolve."""
+    card = {
+        "app": "com.tencent.miniapp",
+        "meta": {
+            "detail_1": {
+                "qqdocurl": "https://www.bilibili.com/video/BV1xx411c7mD",
+                "title": "标题",
+            }
+        },
+    }
+    double_encoded = json.dumps(json.dumps(card))
+    assert ark_extract_url(double_encoded) == (
+        "https://www.bilibili.com/video/BV1xx411c7mD"
+    )
+
+
+def test_ark_extract_nested_fallback() -> None:
+    """URLs in arbitrary nesting are found even without known field names."""
+    payload = {
+        "app": "bili",
+        "meta": {"detail_1": {"host": {"uin": "1", "nick": "up"}}},
+        "extra": {"player": {"target": "https://www.bilibili.com/video/av170001"}},
+    }
+    assert ark_extract_url(json.dumps(payload)) == (
+        "https://www.bilibili.com/video/av170001"
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
     [

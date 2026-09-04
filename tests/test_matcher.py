@@ -125,3 +125,50 @@ def test_quote_included_when_parse_reply_true() -> None:
     )
     message = _message([quote, _element("text", {"content": "转发一下"})])
     assert matcher(_event(), message) is True
+
+
+def _element_with_children(element_type: str, children: list) -> dict:
+    return {"type": element_type, "attrs": {}, "children": children}
+
+
+def test_session_gate_blocks_disabled_session() -> None:
+    matcher = _default_matcher(
+        parse_allowed=lambda session_id: session_id == "allowed-session"
+    )
+    message = _message([_element("text", {"content": BV})])
+    context = SimpleNamespace(session=SimpleNamespace(id="other-session"))
+    assert matcher(_event(), message, context) is False
+
+
+def test_session_gate_allows_enabled_session() -> None:
+    matcher = _default_matcher(
+        parse_allowed=lambda session_id: session_id == "allowed-session"
+    )
+    message = _message([_element("text", {"content": BV})])
+    context = SimpleNamespace(session=SimpleNamespace(id="allowed-session"))
+    assert matcher(_event(), message, context) is True
+
+
+def test_session_gate_defaults_allowed_without_context() -> None:
+    matcher = _default_matcher()
+    message = _message([_element("text", {"content": BV})])
+    assert matcher(_event(), message) is True
+
+
+def test_ark_card_double_encoded_matches_when_session_allowed() -> None:
+    """OneBot double-encodes share-card JSON; matcher must still trigger."""
+    matcher = _default_matcher(
+        parse_allowed=lambda session_id: session_id == "group:1"
+    )
+    card = {
+        "app": "com.tencent.miniapp",
+        "meta": {
+            "detail_1": {
+                "qqdocurl": "https://www.bilibili.com/video/BV1xx411c7mD"
+            }
+        },
+    }
+    double_encoded = json.dumps(json.dumps(card))
+    message = _message([_element("sb:ark", {"data": double_encoded})])
+    context = SimpleNamespace(session=SimpleNamespace(id="group:1"))
+    assert matcher(_event(), message, context) is True

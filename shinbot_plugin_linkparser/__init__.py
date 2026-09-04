@@ -1,12 +1,13 @@
 """ShinBot plugin: link parser that resolves shared links into playable content.
 
-v1 scope: Bilibili video links / share cards only — download the video and
-reply with it, consuming the message by default (see DESIGN.md).
+Scope: Bilibili video links / share cards only — download the video and reply
+with it (see DESIGN.md).
 
-Trigger model: a NORMAL ``message-created`` route with a lightweight custom
-matcher (text URL / ``sb:ark`` card scan). Matching consumes the message so the
-``agent_entry`` fallback does not also reply; which messages match is
-configurable (``parse_on_mention``, ``parse_reply``, ``enabled``).
+Behavior: parsing is **off by default**. ``/parser on`` enables parsing for the
+current session, ``/parser off`` disables it (state is persisted). Only in
+sessions where parsing is enabled does a NORMAL ``message-created`` route
+consume link messages and reply with the video; everywhere else messages fall
+through to the agent untouched.
 """
 
 from __future__ import annotations
@@ -24,19 +25,26 @@ if TYPE_CHECKING:
     from shinbot.core.plugins.context import Plugin
 
 __plugin_name__ = "LinkParser"
-__plugin_description__ = "解析 B 站视频链接/分享卡片，回复可播放的视频本体（v1：仅 B 站视频）。"
+__plugin_description__ = (
+    "解析 B 站视频链接/分享卡片，回复可播放的视频本体；默认不解析，"
+    "使用 /parser on 开启当前会话的解析。"
+)
 
 
 class LinkParserPluginConfig(BaseModel):
-    """Configuration for the link parser plugin (M1 / Bilibili video)."""
+    """Configuration for the link parser plugin (Bilibili video)."""
 
     enabled: bool = Field(
         default=True,
-        description="总开关：关闭后不再解析任何链接。",
+        description="插件总开关：关闭后任何会话都不解析（指令仍可用）。",
+    )
+    parse_by_default: bool = Field(
+        default=False,
+        description="未用 /parser on 开启过的会话是否也解析（默认不解析）。",
     )
     parse_on_mention: bool = Field(
         default=True,
-        description="消息同时 @机器人 时也解析并回复；关闭后此类消息交给 Agent。",
+        description="已开启解析的会话中，消息同时 @机器人 时也解析并回复。",
     )
     parse_reply: bool = Field(
         default=False,
@@ -94,7 +102,7 @@ _client_global: Any | None = None
 
 
 def setup(plg: Plugin) -> None:
-    """Register the Bilibili video parser route and shared client.
+    """Register the parser command, route and shared client.
 
     Framework and third-party imports happen here (not at module import time)
     so the package stays importable in plain unit tests.
@@ -107,9 +115,14 @@ def setup(plg: Plugin) -> None:
     from .debounce import Debouncer
     from .matcher import build_link_matcher
     from .parsers import prune_video_cache
+    from .session_state import SessionStateStore
 
     config = _load_plugin_config(plg.plugin_id)
 
+    state = SessionStateStore(
+        Path(plg.data_dir) / "session_state.json",
+        parse_by_default=config.parse_by_default,
+    )
     client = BilibiliClient(cookie=config.bilibili_cookie, logger=plg.logger)
     _client_global = client
     debouncer = Debouncer(config.debounce_seconds)
@@ -117,6 +130,7 @@ def setup(plg: Plugin) -> None:
         enabled=config.enabled,
         parse_on_mention=config.parse_on_mention,
         parse_reply=config.parse_reply,
+        parse_allowed=lambda session_id: state.is_enabled(session_id),
     )
 
     if config.cache_max_files > 0:
@@ -137,11 +151,59 @@ def setup(plg: Plugin) -> None:
     async def linkparser_route(context: Any, _rule: Any) -> None:
         await _handle_message(plg, config, client, debouncer, context)
 
+    @plg.on_command(
+        "parser",
+        aliases=["linkparser"],
+        description="开启/关闭/查看当前会话的 B 站链接解析",
+        usage="/parser on | /parser off | /parser status",
+        permission="cmd.linkparser",
+    )
+    async def parser_command(ctx: Any, args: str) -> None:
+        await _handle_parser_command(
+            ctx,
+            args,
+            state=state,
+            logger=plg.logger,
+        )
+
     plg.logger.info(
-        "LinkParser loaded (Bilibili video v1; consume=%s, prefer_mp4=%s)",
-        config.enabled,
+        "LinkParser loaded (Bilibili video; parse_by_default=%s, prefer_mp4=%s)",
+        config.parse_by_default,
         config.prefer_mp4,
     )
+
+
+async def _handle_parser_command(
+    ctx: Any,
+    args: str,
+    *,
+    state: Any,
+    logger: Any,
+) -> None:
+    """Handle ``/parser on|off|status`` for the current session."""
+    verb = (args or "").strip().split(None, 1)[0].lower() if (args or "").strip() else ""
+    session_id = str(getattr(ctx, "session_id", "") or "")
+    if not session_id:
+        await ctx.send("无法获取当前会话标识。")
+        return
+    if verb == "on":
+        state.enable(session_id)
+        await ctx.send(
+            "本会话链接解析已开启：发送 B 站视频链接/BV 号/分享卡片将自动解析并回复视频。"
+        )
+    elif verb == "off":
+        state.disable(session_id)
+        await ctx.send("本会话链接解析已关闭。")
+    elif verb in ("status", ""):
+        now_on = state.is_enabled(session_id)
+        default_label = "开启" if state.parse_by_default else "关闭"
+        state_label = "已开启" if now_on else "未开启"
+        await ctx.send(
+            f"本会话解析状态：{state_label}（全局默认：{default_label}）。"
+            "使用 /parser on 开启、/parser off 关闭。"
+        )
+    else:
+        await ctx.send("/parser on|off|status —— 开启/关闭/查看当前会话的链接解析。")
 
 
 async def _handle_message(
