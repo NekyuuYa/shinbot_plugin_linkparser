@@ -227,10 +227,12 @@ class LinkParserPluginConfig(BaseModel):
     max_size_mb: int = 200             # 下载体积上限
     debounce_seconds: int = 300        # 会话防抖窗口（0=关闭）
     cache_max_files: int = 50          # videos 缓存保留 mp4 数（0=不清理）
+    delete_after_send: bool = False    # 发送成功即删本地缓存（关闭跨会话复用）
 ```
 
 写入 ShinBot 配置 `[plugins.shinbot_plugin_linkparser]`。
-已下载文件按 `bv_pN.mp4` 缓存复用（重启后免重复下载）；setup 与每次解析后按 `cache_max_files` 修剪。
+已下载文件按 `bv_pN.mp4` 缓存复用（重启后免重复下载）；setup 与每次解析后按 `cache_max_files` 修剪；
+`delete_after_send=true` 时发送成功即删除文件且不记资源级防抖（同一会话短窗重复仍由链接防抖拦截）。
 会话级 `/parser on|off` 与黑名单持久化、`__plugin_locales__` i18n 留 M2。
 
 ---

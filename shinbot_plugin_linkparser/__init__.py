@@ -81,6 +81,10 @@ class LinkParserPluginConfig(BaseModel):
         ge=0,
         description="videos 缓存目录保留的 mp4 文件数上限（0=不清理）。",
     )
+    delete_after_send: bool = Field(
+        default=False,
+        description="发送成功后删除本地缓存文件（不再跨会话/重启复用）。",
+    )
 
 
 __plugin_config_class__ = LinkParserPluginConfig
@@ -151,7 +155,7 @@ async def _handle_message(
     from shinbot.schema.elements import MessageElement
 
     from .bilibili import BilibiliError
-    from .parsers import parse_video
+    from .parsers import delete_cached_file, parse_video
     from .urls import collect_bilibili_candidates
 
     message_context = context.require_message_context()
@@ -194,13 +198,17 @@ async def _handle_message(
         await message_context.send(message)
         return
 
-    # Reply with the produced mp4; remember the canonical resource for dedupe.
+    # Reply with the produced mp4; remember the canonical resource for dedupe
+    # (unless the file was deleted right after sending).
+    resource_key = f"bilibili:video:{outcome.meta.bvid}:p{outcome.meta.page}"
     try:
         await message_context.send([MessageElement.video(str(outcome.path))])
-        debouncer.remember(
-            session_id,
-            f"bilibili:video:{outcome.meta.bvid}:p{outcome.meta.page}",
-        )
+        if config.delete_after_send:
+            if delete_cached_file(outcome.path):
+                plg.logger.debug("LinkParser removed sent video cache: %s", outcome.path)
+            debouncer.forget(session_id, resource_key)
+        else:
+            debouncer.remember(session_id, resource_key)
     except asyncio.CancelledError:
         raise
     except Exception as exc:

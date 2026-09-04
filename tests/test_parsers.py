@@ -218,3 +218,12 @@ def test_prune_video_cache_keeps_everything_when_disabled(tmp_path) -> None:
     (videos_dir / "b.mp4").write_bytes(b"x")
     assert parsers.prune_video_cache(videos_dir, keep=0) == 0
     assert len(list(videos_dir.glob("*.mp4"))) == 2
+
+
+def test_delete_cached_file(tmp_path) -> None:
+    path = tmp_path / "a.mp4"
+    path.write_bytes(b"x")
+    assert parsers.delete_cached_file(path) is True
+    assert not path.exists()
+    # missing file → False, no error
+    assert parsers.delete_cached_file(path) is False

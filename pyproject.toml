@@ -1,6 +1,6 @@
 [project]
 name = "shinbot-plugin-linkparser"
-version = "0.1.1"
+version = "0.1.2"
 description = "ShinBot link parser: resolve Bilibili video links / share cards and reply with the playable video."
 readme = "README.md"
 requires-python = ">=3.12"

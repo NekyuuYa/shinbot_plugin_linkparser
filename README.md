@@ -29,7 +29,8 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 ```
 
 机器人解析后回复可播放的视频消息；同一会话短时间内重复链接不重复解析。
-已下载的视频按 `bv号_pN.mp4` 缓存复用（重启后同视频不再重新下载），目录按 `cache_max_files` 自动清理。
+已下载的视频按 `bv号_pN.mp4` 缓存复用（重启后同视频不再重新下载），目录按 `cache_max_files` 自动清理；
+若不想留存任何文件，把 `delete_after_send` 设为 `true`（发送成功即删，之后同视频重新分享会再次下载）。
 视频消息发送失败时自动降级为「标题 + 链接」文本（`fallback_to_text`）。
 
 > 平台限制：OneBot 适配器以 base64 上行本地视频文件，超大视频受平台消息大小限制；
@@ -50,6 +51,7 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `max_size_mb` | `200` | 下载体积上限 |
 | `debounce_seconds` | `300` | 同一会话同一链接/资源防抖窗口（秒），0=关闭 |
 | `cache_max_files` | `50` | videos 缓存目录保留的 mp4 文件数上限，0=不清理 |
+| `delete_after_send` | `false` | 发送成功后立即删除本地缓存文件（不再跨会话/重启复用） |
 
 配置写入 ShinBot 配置文件插件块 `[plugins.shinbot_plugin_linkparser]`。
 

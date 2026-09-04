@@ -154,6 +154,24 @@ def _reusable_video(path: Path) -> bool:
         return False
 
 
+def delete_cached_file(path: Path) -> bool:
+    """Delete a cached video file (best-effort).
+
+    Args:
+        path: File to remove.
+
+    Returns:
+        True when the file existed and was removed.
+    """
+    try:
+        if path.is_file():
+            path.unlink()
+            return True
+    except OSError:
+        return False
+    return False
+
+
 def _video_file_name(meta: VideoMeta) -> str:
     """Build a deterministic, safe output file name for a video part."""
     identifier = (meta.bvid or f"av{meta.avid}").lower()

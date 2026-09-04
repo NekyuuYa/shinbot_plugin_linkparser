@@ -63,7 +63,6 @@ class FakePlugin:
 @pytest.fixture
 def fake_framework(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install fake ``shinbot.core.dispatch.routing`` symbols for setup()."""
-
     class RouteCondition:
         def __init__(self, **kwargs) -> None:
             self.__dict__.update(kwargs)
@@ -149,3 +148,9 @@ def test_setup_prunes_cache_dir(fake_framework, tmp_path, monkeypatch) -> None:
     remaining = sorted(path.name for path in videos_dir.glob("*.mp4"))
     assert remaining == ["fresh.mp4"]
     asyncio.run(plugin.on_disable(fake))
+
+
+def test_config_defaults_keep_sent_cache() -> None:
+    config = plugin.LinkParserPluginConfig()
+    assert config.delete_after_send is False
+    assert config.cache_max_files == 50
