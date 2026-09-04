@@ -6,17 +6,21 @@ platform parsers and tested against a fake client.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from .bilibili import (
     BilibiliClient,
     BilibiliError,
     DashPlan,
+    compress_to_target,
     download_plan_to_file,
     ffmpeg_available,
 )
 from .models import LinkCandidate, ParseOutcome, VideoMeta
 from .urls import find_bilibili_candidates
+
+logger = logging.getLogger("shinbot_plugin_linkparser.parsers")
 
 
 class VideoTooLongError(BilibiliError):
@@ -37,13 +41,18 @@ async def parse_video(
     prefer_mp4: bool = True,
     max_quality: int = 80,
     cache_max_files: int = 0,
+    max_send_mb: int = 0,
+    compress: bool = True,
+    compress_max_height: int = 720,
 ) -> ParseOutcome:
     """Resolve, download (or reuse) and produce a local mp4 for *candidate*.
 
     Steps: expand ``b23.tv`` short links → fetch metadata → apply duration and
     size guards → reuse an existing cache file when present, otherwise resolve
     a stream plan and download (merging DASH streams with ffmpeg when needed).
-    Afterward the video cache directory is pruned to *cache_max_files*.
+    When the result exceeds *max_send_mb*, re-encode it with ffmpeg toward the
+    send cap (no need to upload the source's best quality). Afterward the video
+    cache directory is pruned to *cache_max_files*.
 
     Args:
         client: Initialised Bilibili client.
@@ -54,6 +63,10 @@ async def parse_video(
         prefer_mp4: Prefer the single-file HTML5 mp4 stream.
         max_quality: Maximum quality (qn) allowed for the DASH fallback.
         cache_max_files: Max mp4 files kept in the cache dir (0 disables).
+        max_send_mb: Send size cap in MB; oversized files are compressed toward
+            this cap when possible (0 disables compression).
+        compress: Allow ffmpeg compression toward the send cap.
+        compress_max_height: Maximum frame height for compressed output.
 
     Returns:
         A :class:`ParseOutcome` with the produced file path and metadata.
@@ -114,9 +127,41 @@ async def parse_video(
         )
         outcome = ParseOutcome(path=dest, meta=meta)
 
+    if (
+        max_send_mb > 0
+        and compress
+        and meta.duration_seconds > 0
+        and _file_size_mb(dest) > max_send_mb
+    ):
+        # Compress toward the send cap so oversized downloads can still be sent
+        # as a (smaller, lower-quality) video instead of a bare link.
+        compressed = await compress_to_target(
+            dest,
+            dest,
+            target_bytes=max_send_mb * 1024 * 1024,
+            duration_seconds=meta.duration_seconds,
+            max_height=compress_max_height,
+        )
+        if compressed:
+            logger.info(
+                "LinkParser compressed %s to %dMB for send cap %dMB",
+                dest.name,
+                _file_size_mb(dest),
+                max_send_mb,
+            )
+            outcome = ParseOutcome(path=dest, meta=meta)
+
     if cache_max_files > 0:
         prune_video_cache(videos_dir, keep=cache_max_files)
     return outcome
+
+
+def _file_size_mb(path: Path) -> int:
+    """Return a file's size in whole MiB (0 on any error)."""
+    try:
+        return int(path.stat().st_size // (1024 * 1024))
+    except OSError:
+        return 0
 
 
 def prune_video_cache(videos_dir: Path, keep: int) -> int:

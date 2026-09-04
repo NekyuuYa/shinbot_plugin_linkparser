@@ -227,3 +227,94 @@ def test_delete_cached_file(tmp_path) -> None:
     assert not path.exists()
     # missing file → False, no error
     assert parsers.delete_cached_file(path) is False
+
+
+def _write_megabytes(path, mb):
+    path.write_bytes(b"0" * (mb * 1024 * 1024))
+
+
+def test_oversize_triggers_compression(tmp_path, monkeypatch) -> None:
+    candidate = _candidate()
+    client = FakeClient(meta=_meta(duration_seconds=120))
+    dest = tmp_path / "videos" / f"{BV.lower()}_p1.mp4"
+
+    async def fake_download(http, plan, target, *, max_bytes):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _write_megabytes(dest, 3)
+        return dest
+
+    calls = {"compress": 0}
+
+    async def fake_compress(src, dst, *, target_bytes, duration_seconds, max_height):
+        calls["compress"] += 1
+        assert duration_seconds == 120
+        assert target_bytes == 1 * 1024 * 1024
+        assert max_height == 720
+        dst.write_bytes(b"small")
+        return True
+
+    monkeypatch.setattr(parsers, "download_plan_to_file", fake_download)
+    monkeypatch.setattr(parsers, "compress_to_target", fake_compress)
+
+    outcome = asyncio.run(
+        parse_video(
+            client,
+            candidate,
+            data_dir=tmp_path,
+            max_size_mb=10,
+            max_send_mb=1,
+            compress=True,
+            compress_max_height=720,
+        )
+    )
+    assert calls["compress"] == 1
+    assert outcome.path.read_bytes() == b"small"
+
+
+def test_under_cap_skips_compression(tmp_path, monkeypatch) -> None:
+    candidate = _candidate()
+    client = FakeClient(meta=_meta(duration_seconds=60))
+    dest = tmp_path / "videos" / f"{BV.lower()}_p1.mp4"
+
+    async def fake_download(http, plan, target, *, max_bytes):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"tiny")
+        return dest
+
+    calls = {"compress": 0}
+
+    async def fake_compress(*_a, **_k):
+        calls["compress"] += 1
+        return True
+
+    monkeypatch.setattr(parsers, "download_plan_to_file", fake_download)
+    monkeypatch.setattr(parsers, "compress_to_target", fake_compress)
+
+    asyncio.run(
+        parse_video(client, candidate, data_dir=tmp_path, max_send_mb=50, compress=True)
+    )
+    assert calls["compress"] == 0
+
+
+def test_compression_can_be_disabled(tmp_path, monkeypatch) -> None:
+    candidate = _candidate()
+    client = FakeClient(meta=_meta(duration_seconds=60))
+    dest = tmp_path / "videos" / f"{BV.lower()}_p1.mp4"
+
+    async def fake_download(http, plan, target, *, max_bytes):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _write_megabytes(dest, 3)
+        return dest
+
+    async def fake_compress(*_a, **_k):
+        raise AssertionError("should not compress")
+
+    monkeypatch.setattr(parsers, "download_plan_to_file", fake_download)
+    monkeypatch.setattr(parsers, "compress_to_target", fake_compress)
+
+    outcome = asyncio.run(
+        parse_video(
+            client, candidate, data_dir=tmp_path, max_size_mb=10, max_send_mb=1, compress=False
+        )
+    )
+    assert outcome.path.stat().st_size > 1024 * 1024

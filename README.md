@@ -48,16 +48,17 @@ curl -X POST http://localhost:3945/api/v1/plugins/shinbot_plugin_linkparser/enab
 https://www.bilibili.com/video/BV1xx411c7mD?p=2
 ```
 
-机器人解析并回复可播放的视频消息。同一会话短时间重复链接不重复解析；
-已下载视频按 `bv号_pN.mp4` 缓存复用（重启后不再重新下载），目录按 `cache_max_files` 自动清理；
+机器人解析并回复可播放的视频消息（超过 `max_send_mb` 的会自动压缩后直发，不必上传原画）。
+同一会话短时间重复链接不重复解析；
+已下载视频按 `bv号_pN.mp4` 缓存复用（重启后不再重新下载，压缩版本也会缓存），目录按 `cache_max_files` 自动清理；
 发送成功后不删除缓存，若想零留存把 `delete_after_send` 设为 `true`。
-视频消息发送失败时自动降级为「标题 + 链接」文本（`fallback_to_text`）。
+发送失败时自动降级为「标题 + 链接」文本（`fallback_to_text`）。
 
-> 平台限制（OneBot）：适配器会把本地视频整体转 `base64://` 上行。大视频极易超过适配器
-> `request_timeout`（表现为发送超时、甚至适配器断开）——插件已做三重防护：
-> `max_send_mb` 前置截断（超限直接回链接文本）、发送失败自动降级「标题+链接」、
-> 兜底发送也失败时静默记日志（绝不抛错）。若你的平台能传大文件，把 `max_send_mb`
-> 调大，并相应把 OneBot 适配器配置里的 `request_timeout` 调大（如 300s）。
+> 平台限制（OneBot）：适配器会把本地视频整体转 `base64://` 上行，大文件易超过适配器
+> `request_timeout`。插件默认把超限视频自动压缩到 `max_send_mb` 内再直发（需 ffmpeg）；
+> ffmpeg 缺失或压缩仍超限时回「标题+链接」文本，且所有失败路径绝不抛错。
+> 若要调大直发体积：把 `max_send_mb`/`compress_max_height` 调大，并相应把 OneBot
+> 适配器配置里的 `request_timeout` 调大（如 300s）。
 
 ## 配置
 
@@ -74,7 +75,9 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `max_quality` | `80` | DASH 路径最高清晰度（qn：16=360P … 80=1080P … 127=8K） |
 | `max_duration_seconds` | `0` | 视频时长上限（秒），0=不限制 |
 | `max_size_mb` | `200` | 下载体积上限 |
-| `max_send_mb` | `50` | 直发视频上限（MB）；超过则不发视频、改发标题+链接。OneBot 以 base64 上行大文件易超适配器 `request_timeout`，可按平台实测调大（同时把适配器 `request_timeout` 调大，如 300s） |
+| `max_send_mb` | `50` | 直发视频体积上限（MB）：超限先用 ffmpeg 压缩到该体积内再直发 |
+| `compress` | `true` | 允许自动压缩（超 max_send_mb 时），无需上传原画 |
+| `compress_max_height` | `720` | 压缩输出最大高度 px（宽高比保持）；压缩不可用时才回标题+链接 |
 | `debounce_seconds` | `300` | 同一会话同一链接/资源防抖窗口（秒），0=关闭 |
 | `cache_max_files` | `50` | videos 缓存目录保留的 mp4 文件数上限，0=不清理 |
 | `delete_after_send` | `false` | 发送成功后删除本地缓存文件（不再跨会话/重启复用） |

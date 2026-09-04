@@ -7,7 +7,7 @@ from .client import (
     SingleFilePlan,
     VideoMeta,
 )
-from .download import download_plan_to_file, ffmpeg_available
+from .download import compress_to_target, download_plan_to_file, ffmpeg_available
 
 __all__ = [
     "BilibiliClient",
@@ -15,6 +15,7 @@ __all__ = [
     "DashPlan",
     "SingleFilePlan",
     "VideoMeta",
+    "compress_to_target",
     "download_plan_to_file",
     "ffmpeg_available",
 ]

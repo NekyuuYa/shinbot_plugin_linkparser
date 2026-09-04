@@ -1,6 +1,6 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**B站视频解析 v0.3.1**（114 项单测通过、ruff 干净；HTML5/DASH 两条下载路径与真实 QQ 卡片
+> 状态：**B站视频解析 v0.3.2**（119 项单测通过、ruff 干净；HTML5/DASH 两条下载路径与真实 QQ 卡片
 > 端到端验证过）。v0.3.0 引入三档解析策略：**off / at / always**，按会话设置（`/parser`），
 > matcher 为精确程序化判定（@+引用 时经 message_logs 核实引用内容，无链接的 @ 不吞）。
 
@@ -123,8 +123,10 @@ admin/owner 默认拥有）直接读写 store；`status` 显示当前档位与�
 
 OneBot v11 出站 `MessageElement(type="video")` → `{"type":"video","data":{"file":…}}`，本地文件整体转
 `base64://` 上行。大视频极易超过适配器 `request_timeout`（发送超时、适配器断开）。防护：
-`max_send_mb` 前置截断（回链接文本）+ 发送失败 `fallback_to_text` 降级 + 兜底失败静默（`_safe_send`
-绝不抛错、失败即 forget 防抖允许重试、缓存保留）。建议同步调大 OneBot `request_timeout`（如 300s）。
+超限先经 `compress_to_target`（libx264 + AAC，按时长算码率、`max_height` 限高）压缩到
+`max_send_mb` 内再直发（不传原画）；压缩不可用/仍超限才回链接文本。发送失败 `fallback_to_text`
+降级 + 兜底失败静默（`_safe_send` 绝不抛错、失败即 forget 防抖允许重试、缓存保留）。
+建议同步调大 OneBot `request_timeout`（如 300s）以便更大直发。
 Satori 适配器支持 `video`（上传）。
 
 ---
@@ -162,7 +164,9 @@ class LinkParserPluginConfig(BaseModel):
     max_quality: int = 80
     max_duration_seconds: int = 0
     max_size_mb: int = 200
-    max_send_mb: int = 50      # 直发上限，超限回链接文本（OneBot base64 易超时）
+    max_send_mb: int = 50      # 直发上限，超限自动压缩到该体积（OneBot base64 易超时）
+    compress: bool = True         # 允许 ffmpeg 压缩（不传原画）
+    compress_max_height: int = 720
     debounce_seconds: int = 300
     cache_max_files: int = 50
     delete_after_send: bool = False
@@ -179,18 +183,20 @@ class LinkParserPluginConfig(BaseModel):
 
 ## 8. 测试
 
-114 项单测全部离线：`urls`（候选/边界/去重/ark 单双编码/真实卡片回归）、`parse_policy`
+119 项单测全部离线：`urls`（候选/边界/去重/ark 单双编码/真实卡片回归）、`parse_policy`
 （三档矩阵：off/at 需 @、at 引用经 resolver/children、always 引用受 parse_reply 约束且与 at 解耦、
 DB resolver）、`matcher`（三档 + @/引用精确性：@无链接不匹配、引用经 DB 有链接才匹配）、
 `session_state`（档位/默认/持久化/非法值/旧格式迁移）、`debounce`、`parsers`、`bilibili client`、
 `download`、`packaging`、`plugin_entry`（fake-Plugin：默认 off/各档 matcher/指令 toggling/修剪）、
-`handler`（发送成功/超时降级文本/适配器全挂静默/超限截断，均不抛错）。
+`handler`（发送成功/超时降级文本/适配器全挂静默/超限截断，均不抛错）、
+`compress`（真实 ffmpeg：6s 测试片 2MB→<0.5MB 且仍为合法 mp4；无 ffmpeg 分支）。
 端到端（开发期手动）：匿名 HTML5 下载 33s/8.8MB 成功；DASH 480P+ffmpeg 合并成功；
 真实 QQ 卡片（OneBot 双重编码，`b23.tv/WD4aMAF`）→ `BV1h38C6SEfh` → 元数据正常。
 
 ## 9. Roadmap
 
-- **已实现（0.3.x）**：发送失败链路加固（`max_send_mb` 截断、`_safe_send` 绝不抛错、失败可重试）；B站视频解析下载、卡片（sb:ark 双重编码）解析、三档策略（off/at/always）会话化、
+- **已实现（0.3.x）**：发送失败链路加固（`_safe_send` 绝不抛错、失败可重试）；超限视频自动 ffmpeg
+  压缩到 `max_send_mb` 后直发（`compress`/`compress_max_height`，不传原画）；B站视频解析下载、卡片（sb:ark 双重编码）解析、三档策略（off/at/always）会话化、
   精确 matcher（@+引用经 message_logs 核实）、文件缓存/清理、文本兜底、真实卡片回归测试。
 - **Next**：RenderKit 封面信息卡、B站扫码登录态、i18n、多平台解析器注册表、`cmd.linkparser` 权限细粒度化。
 - 各阶段对齐 §7 发布/索引纪律。

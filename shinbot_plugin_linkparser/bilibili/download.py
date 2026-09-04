@@ -158,3 +158,103 @@ async def _ffmpeg_merge(video_path: Path, audio_path: Path, dest: Path) -> bool:
         if asyncio.current_task() is not None and asyncio.current_task().cancelling():
             raise
         return False
+
+
+async def compress_to_target(
+    src: Path,
+    dest: Path,
+    *,
+    target_bytes: int,
+    duration_seconds: int,
+    max_height: int = 720,
+) -> bool:
+    """Re-encode *src* toward *target_bytes* with ffmpeg (H.264 + AAC).
+
+    Used to shrink videos that exceed the platform send cap: no need to upload
+    the source's best quality. Resolution is capped at *max_height* and the
+    video bitrate is derived from the target size and the source duration so
+    the result lands near the cap while staying playable.
+
+    Args:
+        src: Source mp4.
+        dest: Output path (may equal *src*; replaced only on success).
+        target_bytes: Size budget in bytes for the encoded file.
+        duration_seconds: Source duration used for bitrate estimation.
+        max_height: Maximum frame height (aspect ratio preserved).
+
+    Returns:
+        True when the compressed file was produced and moved to *dest*.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    partial = dest.with_name(f"{dest.name}.part")
+
+    duration = max(1, int(duration_seconds))
+    audio_bytes_budget = duration * 96_000 // 8  # ~96kbps AAC
+    video_budget = max(0, int(target_bytes * 0.9) - audio_bytes_budget)
+    video_kbps = max(200, int(video_budget * 8 / duration / 1000))
+    video_kbps = min(video_kbps, 6000)
+    height = max(1, min(int(max_height), 2160))
+
+    command = [
+        ffmpeg,
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-vf",
+        f"scale=-2:min(ih\\,{height}),pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-b:v",
+        f"{video_kbps}k",
+        "-maxrate",
+        f"{int(video_kbps * 1.5)}k",
+        "-bufsize",
+        f"{int(video_kbps * 2)}k",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "96k",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(partial),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.warning(
+                "ffmpeg compression failed: %s",
+                stderr.decode(errors="ignore")[:500],
+            )
+            partial.unlink(missing_ok=True)
+            return False
+        if not partial.is_file() or partial.stat().st_size <= 0:
+            partial.unlink(missing_ok=True)
+            return False
+        partial.replace(dest)
+        return True
+    except (OSError, asyncio.CancelledError):
+        partial.unlink(missing_ok=True)
+        if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+            raise
+        return False

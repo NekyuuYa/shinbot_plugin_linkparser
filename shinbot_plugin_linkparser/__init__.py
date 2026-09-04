@@ -91,9 +91,19 @@ class LinkParserPluginConfig(BaseModel):
         ge=1,
         le=4096,
         description=(
-            "直发视频上限（MB）：超过则不发视频、改发标题+链接（OneBot 以 base64 "
-            "上行大文件易超适配器 request_timeout，可按平台实测调大）。"
+            "直发视频体积上限（MB）。超限时用 ffmpeg 自动压缩到该体积内再直发；"
+            "压缩不可用时才回标题+链接（OneBot base64 大文件易超 request_timeout）。"
         ),
+    )
+    compress: bool = Field(
+        default=True,
+        description="超过 max_send_mb 时用 ffmpeg 压缩后再直发（无需上传原画）。",
+    )
+    compress_max_height: int = Field(
+        default=720,
+        ge=144,
+        le=2160,
+        description="压缩输出最大高度（px），宽高比保持。",
     )
     debounce_seconds: int = Field(
         default=300,
@@ -264,7 +274,7 @@ async def _handle_message(
     """Parse the resolved Bilibili link for a matched message and reply."""
     from shinbot.schema.elements import MessageElement
 
-    from .bilibili import BilibiliError
+    from .bilibili import BilibiliError, ffmpeg_available
     from .parse_policy import make_db_quote_resolver, parse_candidates_for, visible_mentions_bot
     from .parsers import delete_cached_file, parse_video
 
@@ -304,6 +314,9 @@ async def _handle_message(
             prefer_mp4=config.prefer_mp4,
             max_quality=config.max_quality,
             cache_max_files=config.cache_max_files,
+            max_send_mb=config.max_send_mb,
+            compress=config.compress,
+            compress_max_height=config.compress_max_height,
         )
     except asyncio.CancelledError:
         debouncer.forget(session_id, link_key)
@@ -321,10 +334,12 @@ async def _handle_message(
     # ── reply ─────────────────────────────────────────────────────────
     size_mb = _file_size_mb(outcome.path)
     if config.max_send_mb > 0 and size_mb > config.max_send_mb:
-        # Skip the platform video attempt entirely: base64-uploading huge
-        # files typically exceeds the adapter's request timeout and can drop
-        # the adapter connection. Reply with a link instead.
+        # Still over the send cap after (attempted) compression — reply with a
+        # link. Usually this means ffmpeg is missing / compression disabled.
         title = outcome.meta.display_title or "视频"
+        hint = ""
+        if config.compress and not ffmpeg_available():
+            hint = "\n（安装 ffmpeg 后本插件可自动压缩后直发）"
         plg.logger.info(
             "LinkParser video %s is %dMB > max_send_mb=%d; sending text fallback",
             outcome.path.name,
@@ -333,7 +348,8 @@ async def _handle_message(
         )
         await _safe_send(
             message_context,
-            f"{title}（{size_mb}MB，超过直发上限 {config.max_send_mb}MB）\n{outcome.meta.page_url}",
+            f"{title}（{size_mb}MB，超过直发上限 {config.max_send_mb}MB）\n"
+            f"{outcome.meta.page_url}{hint}",
             plg.logger,
             "oversize-fallback",
         )
