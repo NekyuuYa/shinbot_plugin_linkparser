@@ -3,11 +3,16 @@
 Scope: Bilibili video links / share cards only — download the video and reply
 with it (see DESIGN.md).
 
-Behavior: parsing is **off by default**. ``/parser on`` enables parsing for the
-current session, ``/parser off`` disables it (state is persisted). Only in
-sessions where parsing is enabled does a NORMAL ``message-created`` route
-consume link messages and reply with the video; everywhere else messages fall
-through to the agent untouched.
+Parse policy has three modes, set per session with ``/parser`` (default off):
+
+- ``off``    — never parse.
+- ``at``     — parse only when the bot is @-mentioned; for reply/quote messages
+               the quoted content is resolved (message_logs) and parsed too.
+- ``always`` — parse every message carrying a parseable link (quote content
+               additionally when ``parse_reply`` is enabled).
+
+The route matcher applies the mode precisely (including the DB-backed quote
+resolution), so disabled/other messages flow to the agent untouched.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import sys
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -26,8 +31,8 @@ if TYPE_CHECKING:
 
 __plugin_name__ = "LinkParser"
 __plugin_description__ = (
-    "解析 B 站视频链接/分享卡片，回复可播放的视频本体；默认不解析，"
-    "使用 /parser on 开启当前会话的解析。"
+    "解析 B 站视频链接/分享卡片并回复视频；默认不解析，"
+    "/parser at|always 按会话开启（off/at/always 三档）。"
 )
 
 
@@ -38,17 +43,19 @@ class LinkParserPluginConfig(BaseModel):
         default=True,
         description="插件总开关：关闭后任何会话都不解析（指令仍可用）。",
     )
-    parse_by_default: bool = Field(
-        default=False,
-        description="未用 /parser on 开启过的会话是否也解析（默认不解析）。",
-    )
-    parse_on_mention: bool = Field(
-        default=True,
-        description="已开启解析的会话中，消息同时 @机器人 时也解析并回复。",
+    default_mode: Literal["off", "at", "always"] = Field(
+        default="off",
+        description=(
+            "未用 /parser 设置过的会话使用的解析档位："
+            "off=不解析；at=仅 @机器人 时解析（含其引用内容）；always=总是解析。"
+        ),
     )
     parse_reply: bool = Field(
         default=False,
-        description="同时解析引用回复（quote）中的链接。",
+        description=(
+            "在 always 档下同时解析引用回复（quote）里的链接；"
+            "at 档对 @消息所引用内容的解析不依赖此项。"
+        ),
     )
     fallback_to_text: bool = Field(
         default=True,
@@ -100,6 +107,11 @@ __plugin_config_class__ = LinkParserPluginConfig
 _client_global: Any | None = None
 """Shared BilibiliClient kept for teardown; replaced on every setup()."""
 
+_USAGE_TEXT = (
+    "/parser off|at|always|status —— "
+    "off=不解析；at=仅 @机器人 时解析（含其引用的消息）；always=总是解析（on 同 always）。"
+)
+
 
 def setup(plg: Plugin) -> None:
     """Register the parser command, route and shared client.
@@ -121,16 +133,16 @@ def setup(plg: Plugin) -> None:
 
     state = SessionStateStore(
         Path(plg.data_dir) / "session_state.json",
-        parse_by_default=config.parse_by_default,
+        default_mode=config.default_mode,
     )
     client = BilibiliClient(cookie=config.bilibili_cookie, logger=plg.logger)
     _client_global = client
     debouncer = Debouncer(config.debounce_seconds)
     matcher = build_link_matcher(
         enabled=config.enabled,
-        parse_on_mention=config.parse_on_mention,
         parse_reply=config.parse_reply,
-        parse_allowed=lambda session_id: state.is_enabled(session_id),
+        get_mode=lambda session_id: state.mode(session_id),
+        database=plg.database,
     )
 
     if config.cache_max_files > 0:
@@ -149,26 +161,22 @@ def setup(plg: Plugin) -> None:
         match_mode=RouteMatchMode.NORMAL,
     )
     async def linkparser_route(context: Any, _rule: Any) -> None:
-        await _handle_message(plg, config, client, debouncer, context)
+        await _handle_message(plg, config, state, client, debouncer, context)
 
     @plg.on_command(
         "parser",
         aliases=["linkparser"],
-        description="开启/关闭/查看当前会话的 B 站链接解析",
-        usage="/parser on | /parser off | /parser status",
+        description="设置当前会话的 B 站链接解析档位（off/at/always）",
+        usage="/parser off|at|always|status",
         permission="cmd.linkparser",
     )
     async def parser_command(ctx: Any, args: str) -> None:
-        await _handle_parser_command(
-            ctx,
-            args,
-            state=state,
-            logger=plg.logger,
-        )
+        await _handle_parser_command(ctx, args, state=state, logger=plg.logger)
 
     plg.logger.info(
-        "LinkParser loaded (Bilibili video; parse_by_default=%s, prefer_mp4=%s)",
-        config.parse_by_default,
+        "LinkParser loaded (Bilibili video; default_mode=%s, parse_reply=%s, prefer_mp4=%s)",
+        config.default_mode,
+        config.parse_reply,
         config.prefer_mp4,
     )
 
@@ -180,56 +188,67 @@ async def _handle_parser_command(
     state: Any,
     logger: Any,
 ) -> None:
-    """Handle ``/parser on|off|status`` for the current session."""
+    """Handle ``/parser off|at|always|status`` for the current session."""
     verb = (args or "").strip().split(None, 1)[0].lower() if (args or "").strip() else ""
     session_id = str(getattr(ctx, "session_id", "") or "")
     if not session_id:
         await ctx.send("无法获取当前会话标识。")
         return
-    if verb == "on":
-        state.enable(session_id)
-        await ctx.send(
-            "本会话链接解析已开启：发送 B 站视频链接/BV 号/分享卡片将自动解析并回复视频。"
-        )
-    elif verb == "off":
-        state.disable(session_id)
-        await ctx.send("本会话链接解析已关闭。")
+
+    aliases = {"on": "always", "all": "always"}
+    mode = aliases.get(verb, verb)
+    if mode in ("off", "at", "always"):
+        state.set_mode(session_id, mode)
+        labels = {
+            "off": "不解析",
+            "at": "仅 @本机器人 时解析（含其引用的消息内容）",
+            "always": "总是解析链接消息",
+        }
+        await ctx.send(f"本会话解析已设为 {mode}（{labels[mode]}）。")
     elif verb in ("status", ""):
-        now_on = state.is_enabled(session_id)
-        default_label = "开启" if state.parse_by_default else "关闭"
-        state_label = "已开启" if now_on else "未开启"
+        current = state.mode(session_id)
         await ctx.send(
-            f"本会话解析状态：{state_label}（全局默认：{default_label}）。"
-            "使用 /parser on 开启、/parser off 关闭。"
+            f"本会话解析档位：{current}（全局默认：{state.default_mode}）。\n{_USAGE_TEXT}"
         )
     else:
-        await ctx.send("/parser on|off|status —— 开启/关闭/查看当前会话的链接解析。")
+        await ctx.send(_USAGE_TEXT)
 
 
 async def _handle_message(
     plg: Plugin,
     config: LinkParserPluginConfig,
+    state: Any,
     client: Any,
     debouncer: Any,
     context: Any,
 ) -> None:
-    """Parse the first scannable Bilibili link and reply with the video."""
+    """Parse the resolved Bilibili link for a matched message and reply."""
     from shinbot.schema.elements import MessageElement
 
     from .bilibili import BilibiliError
+    from .parse_policy import make_db_quote_resolver, parse_candidates_for, visible_mentions_bot
     from .parsers import delete_cached_file, parse_video
-    from .urls import collect_bilibili_candidates
 
     message_context = context.require_message_context()
-    candidates = collect_bilibili_candidates(
-        message_context.message.elements,
-        include_quote=config.parse_reply,
+    elements = message_context.message.elements
+    session_id = message_context.session_id
+    mode = state.mode(session_id)
+
+    resolver = None
+    if mode == "at" or (mode == "always" and config.parse_reply):
+        resolver = make_db_quote_resolver(plg.database, session_id)
+    candidates = parse_candidates_for(
+        elements,
+        mode=mode,
+        mentions_bot=visible_mentions_bot(elements, message_context.event.self_id),
+        parse_reply=config.parse_reply,
+        resolve_quote=resolver,
     )
     if not candidates:
+        plg.logger.debug("LinkParser: no parseable target in matched message")
         return
 
     candidate = candidates[0]
-    session_id = message_context.session_id
     link_key = candidate.matched or candidate.resource_key()
     if debouncer.hit(session_id, link_key):
         plg.logger.debug("LinkParser debounce hit: %s", link_key)

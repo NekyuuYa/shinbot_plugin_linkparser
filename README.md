@@ -3,18 +3,24 @@
 ShinBot 插件：解析 **Bilibili 视频**（链接 / `BV`/`av` 号 / `b23.tv` 短链 / QQ 分享卡片，含 `?p=N` 分 P），
 下载为可播放 mp4 后**以视频消息回复**。
 
-**默认不解析**：只在用指令开启过解析的会话中生效（状态持久化，重启有效）。未开启的会话里一切照旧、
-消息正常交给 Agent，不受本插件影响。
+**默认不解析**。解析档位按会话设置（三档），状态持久化：
+
+| 档位 | 行为 |
+|---|---|
+| `off` | 不解析（默认） |
+| `at` | **仅当消息 @了本机器人** 时解析：查消息自身文本里的链接；若该 @ 消息是引用回复，则解析其**引用的消息内容**（经 message_logs 精确判定，无链接的 @ 提问不会被吞） |
+| `always` | **总是解析**链接消息（含 QQ 分享卡片）；引用回复内容在 `parse_reply=true` 时一并解析 |
 
 ## 指令
 
 | 指令 | 权限 | 说明 |
 |---|---|---|
-| `/parser on` | `cmd.linkparser` | 开启当前会话的 B 站链接解析 |
-| `/parser off` | `cmd.linkparser` | 关闭当前会话的解析 |
-| `/parser status` | `cmd.linkparser` | 查看当前会话解析状态与全局默认 |
+| `/parser off` | `cmd.linkparser` | 当前会话不解析 |
+| `/parser at` | `cmd.linkparser` | 仅 @机器人 时解析（含 @ 消息引用的内容） |
+| `/parser always` | `cmd.linkparser` | 总是解析（`on` 是 `always` 的别名） |
+| `/parser status` | `cmd.linkparser` | 查看当前会话档位与全局默认 |
 
-别名：`/linkparser`。`cmd.linkparser` 默认授予 admin/owner 分组；如需群友自行开关，
+别名：`/linkparser`。`cmd.linkparser` 默认授予 admin/owner 分组；如需群友自行设置，
 在权限配置中把该节点授予对应用户/分组即可。
 
 ## 安装
@@ -30,13 +36,13 @@ curl -X POST http://localhost:3945/api/v1/plugins/shinbot_plugin_linkparser/enab
 
 ## 用法
 
-群主/管理员先 `开启` 当前会话的解析：
+有权限的用户在目标会话设置档位，例如管理员想让该群"发链接就解析"：
 
 ```
-/parser on
+/parser always
 ```
 
-之后群友发 B站视频链接、裸 `BV`/`av` 号、`b23.tv` 短链或 **QQ 分享卡片**（含 `?p=N` 分 P）：
+之后群友发 B站视频链接、裸 `BV`/`av` 号、`b23.tv` 短链或 **QQ 分享卡片**（含 `?p=N`）：
 
 ```
 https://www.bilibili.com/video/BV1xx411c7mD?p=2
@@ -57,9 +63,8 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `enabled` | `true` | 插件总开关（关闭后任何会话都不解析，指令仍可用） |
-| `parse_by_default` | `false` | 未用 /parser on 开启的会话是否默认解析 |
-| `parse_on_mention` | `true` | 已开启解析的会话中，@机器人 的消息也解析 |
-| `parse_reply` | `false` | 同时解析引用回复中的链接 |
+| `default_mode` | `"off"` | 未用 /parser 设置过的会话的档位：`off`/`at`/`always` |
+| `parse_reply` | `false` | `always` 档下同时解析引用回复（quote）里的链接；`at` 档对 @消息引用内容的解析不依赖此项 |
 | `fallback_to_text` | `true` | 视频发送失败时降级为「标题+链接」文本 |
 | `prefer_mp4` | `true` | 优先单文件 mp4（HTML5，匿名最高约 1080P）；`false` 走 DASH+ffmpeg 合并 |
 | `bilibili_cookie` | `""` | B站 SESSDATA（可选，DASH 高清晰度） |

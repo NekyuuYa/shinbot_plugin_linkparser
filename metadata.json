@@ -1,9 +1,9 @@
 {
   "id": "shinbot_plugin_linkparser",
   "name": "LinkParser",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "NekyuuYa",
-  "description": "解析 B 站视频链接/分享卡片，回复可播放的视频本体；默认不解析，用 /parser on 开启当前会话解析。",
+  "description": "解析 B 站视频链接/分享卡片并回复视频；默认不解析，/parser 按会话设置 off/at/always 档位。",
   "entry": "shinbot_plugin_linkparser/__init__.py",
   "role": "logic",
   "permissions": [

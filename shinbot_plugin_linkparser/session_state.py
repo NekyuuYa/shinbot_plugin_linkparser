@@ -1,14 +1,16 @@
-"""Per-session parse toggle state for the LinkParser plugin.
+"""Per-session parse-mode state for the LinkParser plugin.
 
-By default the plugin does not parse anything; a user enables parsing for the
-*current session* with ``/parser on`` (and disables with ``/parser off``).
-State is persisted as JSON under the plugin data dir so toggles survive bot
-restarts.
+Parsing is off by default; a session's parse mode is set with the ``/parser``
+command to one of three levels:
 
-Effective state for a session:
-- explicitly enabled (``enabled`` set) → always parse
-- otherwise → parse only when ``parse_by_default`` is on AND the session is
-  not explicitly disabled
+- ``off``    — never parse in this session.
+- ``at``     — parse only when the bot is @-mentioned (checking the message's
+               own text and, for reply/quote messages, the quoted content).
+- ``always`` — parse every message carrying a parseable link.
+
+State is persisted as JSON under the plugin data dir so levels survive bot
+restarts. Sessions without an explicit level fall back to the configured
+``default_mode``.
 """
 
 from __future__ import annotations
@@ -16,66 +18,55 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
+
+from .parse_policy import ParseMode, normalize_mode
 
 logger = logging.getLogger("shinbot_plugin_linkparser.session_state")
 
 
 class SessionStateStore:
-    """Persisted per-session on/off state."""
+    """Persisted per-session parse-mode state."""
 
-    def __init__(self, path: Path, *, parse_by_default: bool = False) -> None:
+    def __init__(self, path: Path, *, default_mode: str = "off") -> None:
         """Initialize the store.
 
         Args:
             path: JSON file used for persistence.
-            parse_by_default: Whether sessions without an explicit toggle parse.
+            default_mode: Mode used for sessions without an explicit level.
         """
         self._path = path
-        self._parse_by_default = bool(parse_by_default)
-        self._enabled: set[str] = set()
-        self._disabled: set[str] = set()
+        self._default_mode = normalize_mode(default_mode)
+        self._modes: dict[str, str] = {}
         self._load()
 
     # ── queries ──────────────────────────────────────────────────────
 
     @property
-    def parse_by_default(self) -> bool:
-        """Return whether sessions default to parsing."""
-        return self._parse_by_default
+    def default_mode(self) -> ParseMode:
+        """Return the mode used when a session has no explicit level."""
+        return self._default_mode  # type: ignore[return-value]
 
-    def is_enabled(self, session_id: str | None) -> bool:
-        """Return whether parsing is enabled for a session."""
+    def mode(self, session_id: str | None) -> ParseMode:
+        """Return the effective parse mode for a session."""
         session = session_id or ""
-        if session in self._enabled:
-            return True
-        if self._parse_by_default:
-            return session not in self._disabled
-        return False
+        return normalize_mode(self._modes.get(session, self._default_mode))
 
-    def is_explicitly_disabled(self, session_id: str | None) -> bool:
-        """Return whether a session was explicitly disabled with ``/parser off``."""
-        return (session_id or "") in self._disabled
+    def snapshot(self) -> dict[str, str]:
+        """Return a copy of the explicit per-session levels."""
+        return dict(self._modes)
 
     # ── mutations ────────────────────────────────────────────────────
 
-    def enable(self, session_id: str) -> None:
-        """Turn parsing on for a session and persist."""
+    def set_mode(self, session_id: str, mode: str) -> None:
+        """Set the parse mode for a session and persist."""
         session_id = session_id or ""
-        self._disabled.discard(session_id)
-        added = session_id not in self._enabled
-        self._enabled.add(session_id)
-        if added:
-            self._save()
-
-    def disable(self, session_id: str) -> None:
-        """Turn parsing off for a session and persist."""
-        session_id = session_id or ""
-        removed = session_id in self._enabled
-        self._enabled.discard(session_id)
-        added = session_id not in self._disabled
-        self._disabled.add(session_id)
-        if removed or added:
-            self._save()
+        normalized = normalize_mode(mode)
+        current = self._modes.get(session_id)
+        if current == normalized:
+            return
+        self._modes[session_id] = normalized
+        self._save()
 
     # ── persistence ──────────────────────────────────────────────────
 
@@ -89,19 +80,28 @@ class SessionStateStore:
             return
         if not isinstance(payload, dict):
             return
+        # v0.3.0 format: {"sessions": {"<session>": "<mode>"}}
+        sessions = payload.get("sessions")
+        if isinstance(sessions, dict):
+            for session_id, mode in sessions.items():
+                self._modes[str(session_id)] = normalize_mode(str(mode))
+            return
+        # Legacy v0.2.0 format: {"enabled": [...], "disabled": [...]}
+        # enabled sessions mapped to "always", disabled sessions to "off".
         enabled = payload.get("enabled")
-        disabled = payload.get("disabled")
         if isinstance(enabled, list):
-            self._enabled = {str(value) for value in enabled if value}
+            for session_id in enabled:
+                self._modes[str(session_id)] = "always"
+        disabled = payload.get("disabled")
         if isinstance(disabled, list):
-            self._disabled = {str(value) for value in disabled if value}
+            for session_id in disabled:
+                self._modes[str(session_id)] = "off"
 
     def _save(self) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            payload = {
-                "enabled": sorted(self._enabled),
-                "disabled": sorted(self._disabled),
+            payload: dict[str, Any] = {
+                "sessions": dict(sorted(self._modes.items())),
             }
             partial = self._path.with_name(f"{self._path.name}.tmp")
             partial.write_text(

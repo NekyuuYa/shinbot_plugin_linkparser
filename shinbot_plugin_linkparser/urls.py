@@ -416,3 +416,65 @@ def collect_bilibili_candidates(
             )
             collected.setdefault(key, candidate)
     return list(collected.values())
+
+
+def iter_quote_elements(elements: Sequence[Any]) -> Iterator[tuple[str | None, Sequence[Any]]]:
+    """Yield every ``quote`` element found at any depth as ``(id, children)``.
+
+    Args:
+        elements: Message element list (duck-typed or plain dicts).
+
+    Yields:
+        Tuples of the quote's ``id`` attribute (may be ``None``) and its
+        children (the quoted message content when the adapter attached it).
+    """
+    stack = list(elements)
+    while stack:
+        element = stack.pop()
+        element_type = _el_type(element)
+        if element_type == "quote":
+            quote_id = str(_el_attrs(element).get("id", "") or "") or None
+            yield quote_id, _el_children(element)
+            continue
+        children = _el_children(element)
+        if children:
+            stack.extend(children)
+
+
+def collect_bilibili_candidates_in_quotes(elements: Sequence[Any]) -> list[LinkCandidate]:
+    """Collect candidates from quoted-message content only (quote subtrees).
+
+    Args:
+        elements: Message element list (duck-typed or plain dicts).
+
+    Returns:
+        Deduplicated candidates found inside any ``quote`` element children.
+    """
+    collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
+    for _quote_id, children in iter_quote_elements(elements):
+        for candidate in collect_bilibili_candidates(children):
+            key = (
+                candidate.platform,
+                candidate.kind,
+                candidate.bvid
+                or (f"av{candidate.avid}" if candidate.avid else f"b23:{candidate.short_code}"),
+                candidate.page,
+            )
+            collected.setdefault(key, candidate)
+    return list(collected.values())
+
+
+def merge_candidates(*groups: Sequence[LinkCandidate]) -> list[LinkCandidate]:
+    """Merge candidate groups, deduplicating by resource key (first wins)."""
+    collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
+    for group in groups:
+        for candidate in group:
+            key = (
+                candidate.platform,
+                candidate.kind,
+                candidate.bvid
+                or (f"av{candidate.avid}" if candidate.avid else f"b23:{candidate.short_code}"),
+                candidate.page,
+            )
+            collected.setdefault(key, candidate)
+    return list(collected.values())
