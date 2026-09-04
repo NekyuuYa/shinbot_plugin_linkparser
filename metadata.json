@@ -1,7 +1,7 @@
 {
   "id": "shinbot_plugin_linkparser",
   "name": "LinkParser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "NekyuuYa",
   "description": "解析 B 站视频链接/分享卡片，回复可播放的视频本体（v1：仅 B 站视频）。",
   "entry": "shinbot_plugin_linkparser/__init__.py",

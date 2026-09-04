@@ -160,6 +160,61 @@ def test_size_config_is_passed_through(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(parsers, "download_plan_to_file", fake_download)
 
-
     asyncio.run(parse_video(client, candidate, data_dir=tmp_path, max_size_mb=37))
     assert captured["max_bytes"] == 37 * 1024 * 1024
+
+
+def test_existing_cache_file_is_reused(tmp_path, monkeypatch) -> None:
+    candidate = _candidate()
+    client = FakeClient(meta=_meta())
+
+    dest = tmp_path / "videos" / f"{BV.lower()}_p1.mp4"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"cached-content")
+
+    calls = {"download": 0, "resolve_stream": 0}
+
+    async def fake_download(http, plan, dest, *, max_bytes):
+        calls["download"] += 1
+        return dest
+
+    async def fake_resolve_stream(**kwargs):
+        calls["resolve_stream"] += 1
+        return SingleFilePlan(url="https://upos.example/v.mp4")
+
+    monkeypatch.setattr(parsers, "download_plan_to_file", fake_download)
+    client.resolve_stream = fake_resolve_stream
+
+    outcome = asyncio.run(
+        parse_video(client, candidate, data_dir=tmp_path, cache_max_files=10)
+    )
+    assert outcome.path.read_bytes() == b"cached-content"
+    assert calls["download"] == 0
+    assert calls["resolve_stream"] == 0
+
+
+def test_prune_video_cache_keeps_newest(tmp_path) -> None:
+    import os
+    import time
+
+    videos_dir = tmp_path / "videos"
+    videos_dir.mkdir()
+    now = time.time()
+    for index, name in enumerate(["a.mp4", "b.mp4", "c.mp4", "d.mp4"]):
+        path = videos_dir / name
+        path.write_bytes(b"x")
+        os.utime(path, (now + index, now + index))
+
+    removed = parsers.prune_video_cache(videos_dir, keep=2)
+    assert removed == 2
+    remaining = sorted(path.name for path in videos_dir.glob("*.mp4"))
+    assert remaining == ["c.mp4", "d.mp4"]
+
+
+def test_prune_video_cache_keeps_everything_when_disabled(tmp_path) -> None:
+    videos_dir = tmp_path / "videos"
+    videos_dir.mkdir()
+    (videos_dir / "a.mp4").write_bytes(b"x")
+    (videos_dir / "b.mp4").write_bytes(b"x")
+    assert parsers.prune_video_cache(videos_dir, keep=0) == 0
+    assert len(list(videos_dir.glob("*.mp4"))) == 2

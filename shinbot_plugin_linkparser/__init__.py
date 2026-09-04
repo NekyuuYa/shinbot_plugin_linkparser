@@ -76,6 +76,11 @@ class LinkParserPluginConfig(BaseModel):
         ge=0,
         description="同一会话同一链接/资源的防抖窗口（秒），0=关闭。",
     )
+    cache_max_files: int = Field(
+        default=50,
+        ge=0,
+        description="videos 缓存目录保留的 mp4 文件数上限（0=不清理）。",
+    )
 
 
 __plugin_config_class__ = LinkParserPluginConfig
@@ -97,6 +102,7 @@ def setup(plg: Plugin) -> None:
     from .bilibili import BilibiliClient
     from .debounce import Debouncer
     from .matcher import build_link_matcher
+    from .parsers import prune_video_cache
 
     config = _load_plugin_config(plg.plugin_id)
 
@@ -108,6 +114,12 @@ def setup(plg: Plugin) -> None:
         parse_on_mention=config.parse_on_mention,
         parse_reply=config.parse_reply,
     )
+
+    if config.cache_max_files > 0:
+        try:
+            prune_video_cache(Path(plg.data_dir) / "videos", keep=config.cache_max_files)
+        except Exception:
+            plg.logger.debug("LinkParser video cache prune failed", exc_info=True)
 
     @plg.on_route(
         RouteCondition(
@@ -167,6 +179,7 @@ async def _handle_message(
             max_size_mb=config.max_size_mb,
             prefer_mp4=config.prefer_mp4,
             max_quality=config.max_quality,
+            cache_max_files=config.cache_max_files,
         )
     except asyncio.CancelledError:
         debouncer.forget(session_id, link_key)

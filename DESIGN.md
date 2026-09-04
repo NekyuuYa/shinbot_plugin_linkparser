@@ -226,9 +226,11 @@ class LinkParserPluginConfig(BaseModel):
     max_duration_seconds: int = 0      # 时长上限（0=不限）
     max_size_mb: int = 200             # 下载体积上限
     debounce_seconds: int = 300        # 会话防抖窗口（0=关闭）
+    cache_max_files: int = 50          # videos 缓存保留 mp4 数（0=不清理）
 ```
 
 写入 ShinBot 配置 `[plugins.shinbot_plugin_linkparser]`。
+已下载文件按 `bv_pN.mp4` 缓存复用（重启后免重复下载）；setup 与每次解析后按 `cache_max_files` 修剪。
 会话级 `/parser on|off` 与黑名单持久化、`__plugin_locales__` i18n 留 M2。
 
 ---
@@ -243,9 +245,10 @@ class LinkParserPluginConfig(BaseModel):
 ## 8. 测试
 
 - 65 项单测全部离线（无 ShinBot 安装、无网络）：`urls`（候选提取/边界/去重/ark）、
-  `matcher`（场景开关/提及/quote）、`debounce`、`parsers`（FakeClient：b23 展开/时长上限/产物）、
-  `bilibili client`（html5/DASH 计划选择、错误码翻译，使用真实 `VideoDownloadURLDataDetecter`）、
-  `download`（ffmpeg 缺失分支）、`packaging`。
+  `matcher`（场景开关/提及/quote）、`debounce`、`parsers`（FakeClient：b23 展开/时长上限/产物/
+  **缓存复用**/**目录修剪**）、`bilibili client`（html5/DASH 计划选择、错误码翻译，使用真实
+  `VideoDownloadURLDataDetecter`）、`download`（ffmpeg 缺失分支）、`packaging`、
+  `plugin_entry`（fake-Plugin 验证 setup 装配：NORMAL 路由注册 + matcher 行为 + 启动修剪）。
 - 端到端已验证（开发期手动）：匿名 HTML5 下载 33s/8.8MB 视频成功（ftyp 校验）；
   DASH 480P + ffmpeg 合并成功（ffprobe 检出 h264+aac 双流，时长 32s）。
 - 运行：`uv sync` 后 `.venv/bin/python -m pytest tests/ -q`；`uv run` 环境缺失时可 `uvx`。

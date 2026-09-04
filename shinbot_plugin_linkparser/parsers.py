@@ -36,12 +36,14 @@ async def parse_video(
     max_size_mb: int = 0,
     prefer_mp4: bool = True,
     max_quality: int = 80,
+    cache_max_files: int = 0,
 ) -> ParseOutcome:
-    """Resolve, download and produce a local mp4 for *candidate*.
+    """Resolve, download (or reuse) and produce a local mp4 for *candidate*.
 
     Steps: expand ``b23.tv`` short links → fetch metadata → apply duration and
-    size guards → resolve a stream plan → download (merging DASH streams with
-    ffmpeg when needed).
+    size guards → reuse an existing cache file when present, otherwise resolve
+    a stream plan and download (merging DASH streams with ffmpeg when needed).
+    Afterward the video cache directory is pruned to *cache_max_files*.
 
     Args:
         client: Initialised Bilibili client.
@@ -51,6 +53,7 @@ async def parse_video(
         max_size_mb: Download size cap in MB (0 disables).
         prefer_mp4: Prefer the single-file HTML5 mp4 stream.
         max_quality: Maximum quality (qn) allowed for the DASH fallback.
+        cache_max_files: Max mp4 files kept in the cache dir (0 disables).
 
     Returns:
         A :class:`ParseOutcome` with the produced file path and metadata.
@@ -83,31 +86,72 @@ async def parse_video(
             f"（{max_duration_seconds // 60} 分钟），已跳过下载。"
         )
 
-    if meta.cid is None:
-        raise BilibiliError("无法获取该视频的分 P 信息。")
-
-    plan = await client.resolve_stream(
-        bvid=meta.bvid,
-        avid=meta.avid,
-        cid=meta.cid,
-        page_index=meta.page_index,
-        prefer_mp4=prefer_mp4,
-        max_quality=max_quality,
-    )
-    if isinstance(plan, DashPlan) and not ffmpeg_available():
-        raise BilibiliError("该视频需要 ffmpeg 合并音视频流，但环境中未找到 ffmpeg。")
-
     videos_dir = Path(data_dir) / "videos"
     videos_dir.mkdir(parents=True, exist_ok=True)
     dest = videos_dir / _video_file_name(meta)
-    max_bytes = max_size_mb * 1024 * 1024
-    await download_plan_to_file(
-        client.http,
-        plan,
-        dest,
-        max_bytes=max_bytes,
+
+    if _reusable_video(dest):
+        outcome = ParseOutcome(path=dest, meta=meta)
+    else:
+        if meta.cid is None:
+            raise BilibiliError("无法获取该视频的分 P 信息。")
+        plan = await client.resolve_stream(
+            bvid=meta.bvid,
+            avid=meta.avid,
+            cid=meta.cid,
+            page_index=meta.page_index,
+            prefer_mp4=prefer_mp4,
+            max_quality=max_quality,
+        )
+        if isinstance(plan, DashPlan) and not ffmpeg_available():
+            raise BilibiliError("该视频需要 ffmpeg 合并音视频流，但环境中未找到 ffmpeg。")
+        max_bytes = max_size_mb * 1024 * 1024
+        await download_plan_to_file(
+            client.http,
+            plan,
+            dest,
+            max_bytes=max_bytes,
+        )
+        outcome = ParseOutcome(path=dest, meta=meta)
+
+    if cache_max_files > 0:
+        prune_video_cache(videos_dir, keep=cache_max_files)
+    return outcome
+
+
+def prune_video_cache(videos_dir: Path, keep: int) -> int:
+    """Delete oldest mp4 files beyond the newest *keep* (by mtime).
+
+    Args:
+        videos_dir: Directory holding cached mp4 files.
+        keep: Number of newest files to retain (``<= 0`` keeps everything).
+
+    Returns:
+        The number of files removed.
+    """
+    if keep <= 0 or not videos_dir.is_dir():
+        return 0
+    files = sorted(
+        (path for path in videos_dir.glob("*.mp4") if path.is_file()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
     )
-    return ParseOutcome(path=dest, meta=meta)
+    removed = 0
+    for stale in files[keep:]:
+        try:
+            stale.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _reusable_video(path: Path) -> bool:
+    """Return True when a complete cached file already exists for *path*."""
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _video_file_name(meta: VideoMeta) -> str:
