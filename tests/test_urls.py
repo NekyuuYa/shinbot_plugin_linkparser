@@ -209,3 +209,66 @@ def test_collect_candidates_dedupes_text_and_ark_same_video() -> None:
     candidates = collect_bilibili_candidates(elements)
     # text BV + ark b23 → two different sources, both kept (b23 is not the same key)
     assert len(candidates) == 2
+
+
+# ── Regression: real QQ Bilibili mini-app share card (captured 2026-09-04) ──
+
+
+def _real_card_ark_data() -> str:
+    """Reconstruct the sb:ark ``data`` attribute for the captured card.
+
+    The OneBot/QQ adapter stores the card JSON with ``json.dumps`` on top of
+    the already-serialized card text (which itself uses ``\\/`` slash
+    escapes), so the XML ``data`` attribute arrives as a JSON *string literal*.
+    """
+    card = {
+        "ver": "1.0.0.19",
+        "prompt": "[QQ小程序][栖山]ゼロ芒星（零芒星） \\/ 可不",
+        "needShareCallBack": False,
+        "app": "com.tencent.miniapp_01",
+        "view": "view_8C8E89B49BE609866298ADDFF2DBABA4",
+        "meta": {
+            "detail_1": {
+                "appid": "1109937557",
+                "title": "哔哩哔哩",
+                "desc": "[栖山]ゼロ芒星（零芒星） \\/ 可不",
+                "url": "m.q.qq.com/a/s/0a921660c62b103507476f256fae48e9",
+                "qqdocurl": (
+                    "https://b23.tv/WD4aMAF"
+                    "?share_medium=android&share_source=qq"
+                    "&bbid=XU6CCC269BF7F4C11C9F1C224DBC2032EC6E0"
+                    "&ts=1788498405828"
+                ),
+            }
+        },
+    }
+    inner_json = json.dumps(card, ensure_ascii=False).replace("/", "\\/")
+    # Outer json.dumps → the XML attribute value is a JSON string literal.
+    return json.dumps(inner_json, ensure_ascii=False)
+
+
+def test_real_qq_card_extracts_b23_link() -> None:
+    url = ark_extract_url(_real_card_ark_data())
+    assert url is not None
+    assert url.startswith("https://b23.tv/WD4aMAF")
+
+
+def test_real_qq_card_yields_short_link_candidate() -> None:
+    url = ark_extract_url(_real_card_ark_data())
+    candidates = find_bilibili_candidates(url)
+    assert len(candidates) == 1
+    assert candidates[0].short_code == "WD4aMAF"
+    assert candidates[0].needs_redirect is True
+
+
+def test_real_qq_card_collected_from_element() -> None:
+    elements = [
+        {
+            "type": "sb:ark",
+            "attrs": {"data": _real_card_ark_data()},
+            "children": [],
+        }
+    ]
+    candidates = collect_bilibili_candidates(elements)
+    assert len(candidates) == 1
+    assert candidates[0].short_code == "WD4aMAF"
