@@ -53,8 +53,11 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 发送成功后不删除缓存，若想零留存把 `delete_after_send` 设为 `true`。
 视频消息发送失败时自动降级为「标题 + 链接」文本（`fallback_to_text`）。
 
-> 平台限制：OneBot 适配器以 base64 上行本地视频文件，超大视频受平台消息大小限制；
-> 发送失败即走文本兜底。可用 `max_size_mb` 控制下载体积。
+> 平台限制（OneBot）：适配器会把本地视频整体转 `base64://` 上行。大视频极易超过适配器
+> `request_timeout`（表现为发送超时、甚至适配器断开）——插件已做三重防护：
+> `max_send_mb` 前置截断（超限直接回链接文本）、发送失败自动降级「标题+链接」、
+> 兜底发送也失败时静默记日志（绝不抛错）。若你的平台能传大文件，把 `max_send_mb`
+> 调大，并相应把 OneBot 适配器配置里的 `request_timeout` 调大（如 300s）。
 
 ## 配置
 
@@ -71,6 +74,7 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `max_quality` | `80` | DASH 路径最高清晰度（qn：16=360P … 80=1080P … 127=8K） |
 | `max_duration_seconds` | `0` | 视频时长上限（秒），0=不限制 |
 | `max_size_mb` | `200` | 下载体积上限 |
+| `max_send_mb` | `50` | 直发视频上限（MB）；超过则不发视频、改发标题+链接。OneBot 以 base64 上行大文件易超适配器 `request_timeout`，可按平台实测调大（同时把适配器 `request_timeout` 调大，如 300s） |
 | `debounce_seconds` | `300` | 同一会话同一链接/资源防抖窗口（秒），0=关闭 |
 | `cache_max_files` | `50` | videos 缓存目录保留的 mp4 文件数上限，0=不清理 |
 | `delete_after_send` | `false` | 发送成功后删除本地缓存文件（不再跨会话/重启复用） |

@@ -86,6 +86,15 @@ class LinkParserPluginConfig(BaseModel):
         le=4096,
         description="下载体积上限（MB）。",
     )
+    max_send_mb: int = Field(
+        default=50,
+        ge=1,
+        le=4096,
+        description=(
+            "直发视频上限（MB）：超过则不发视频、改发标题+链接（OneBot 以 base64 "
+            "上行大文件易超适配器 request_timeout，可按平台实测调大）。"
+        ),
+    )
     debounce_seconds: int = Field(
         default=300,
         ge=0,
@@ -111,6 +120,36 @@ _USAGE_TEXT = (
     "/parser off|at|always|status —— "
     "off=不解析；at=仅 @机器人 时解析（含其引用的消息）；always=总是解析（on 同 always）。"
 )
+
+
+async def _safe_send(ctx: Any, content: Any, logger: Any, label: str) -> bool:
+    """Send *content*, never letting a platform failure escape the handler.
+
+    Args:
+        ctx: Message context (or anything with ``async send(content)``).
+        content: Payload to send.
+        logger: Logger for warnings.
+        label: Short description used in log lines.
+
+    Returns:
+        True when the send call succeeded.
+    """
+    try:
+        await ctx.send(content)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("LinkParser %s send failed (%s): %s", label, type(exc).__name__, exc)
+        return False
+
+
+def _file_size_mb(path: Path) -> int:
+    """Return a file's size in whole MiB (0 on any error)."""
+    try:
+        return int(path.stat().st_size // (1024 * 1024))
+    except OSError:
+        return 0
 
 
 def setup(plg: Plugin) -> None:
@@ -276,27 +315,63 @@ async def _handle_message(
         else:
             plg.logger.exception("LinkParser parse failure")
             message = "解析视频时发生未知错误，请稍后再试。"
-        await message_context.send(message)
+        await _safe_send(message_context, message, plg.logger, "parse-error")
         return
 
-    # Reply with the produced mp4; remember the canonical resource for dedupe
-    # (unless the file was deleted right after sending).
+    # ── reply ─────────────────────────────────────────────────────────
+    size_mb = _file_size_mb(outcome.path)
+    if config.max_send_mb > 0 and size_mb > config.max_send_mb:
+        # Skip the platform video attempt entirely: base64-uploading huge
+        # files typically exceeds the adapter's request timeout and can drop
+        # the adapter connection. Reply with a link instead.
+        title = outcome.meta.display_title or "视频"
+        plg.logger.info(
+            "LinkParser video %s is %dMB > max_send_mb=%d; sending text fallback",
+            outcome.path.name,
+            size_mb,
+            config.max_send_mb,
+        )
+        await _safe_send(
+            message_context,
+            f"{title}（{size_mb}MB，超过直发上限 {config.max_send_mb}MB）\n{outcome.meta.page_url}",
+            plg.logger,
+            "oversize-fallback",
+        )
+        debouncer.forget(session_id, link_key)
+        return
+
     resource_key = f"bilibili:video:{outcome.meta.bvid}:p{outcome.meta.page}"
     try:
         await message_context.send([MessageElement.video(str(outcome.path))])
-        if config.delete_after_send:
-            if delete_cached_file(outcome.path):
-                plg.logger.debug("LinkParser removed sent video cache: %s", outcome.path)
-            debouncer.forget(session_id, resource_key)
-        else:
-            debouncer.remember(session_id, resource_key)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        plg.logger.warning("LinkParser video send failed: %s", exc)
+        # Platform send failed (timeout/disconnect/etc.). Never let this
+        # escape: keep the cached file, forget debounce so a re-share can
+        # retry, and attempt an informational text reply if possible.
+        plg.logger.warning(
+            "LinkParser video send failed (%s): %s", type(exc).__name__, exc
+        )
+        debouncer.forget(session_id, link_key)
+        debouncer.forget(session_id, resource_key)
         if config.fallback_to_text:
             title = outcome.meta.display_title or "视频"
-            await message_context.send(f"{title}\n{outcome.meta.page_url}")
+            await _safe_send(
+                message_context,
+                f"{title}\n{outcome.meta.page_url}",
+                plg.logger,
+                "send-fallback",
+            )
+        return
+
+    # Send succeeded; remember the canonical resource for dedupe (unless the
+    # file was deleted right after sending).
+    if config.delete_after_send:
+        if delete_cached_file(outcome.path):
+            plg.logger.debug("LinkParser removed sent video cache: %s", outcome.path)
+        debouncer.forget(session_id, resource_key)
+    else:
+        debouncer.remember(session_id, resource_key)
 
 
 async def on_disable(_plg: Plugin) -> None:
