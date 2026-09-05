@@ -1,7 +1,7 @@
 """ShinBot plugin: link parser that resolves shared links into playable content.
 
-Scope: Bilibili video links / share cards only — download the video and reply
-with it (see DESIGN.md).
+Scope: Bilibili video links/cards and Xiaohongshu (小红书) notes — reply with
+the video, or with image galleries stitched into one long image (see DESIGN.md).
 
 Parse policy has three modes, set per session with ``/parser`` (default off):
 
@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 
 __plugin_name__ = "LinkParser"
 __plugin_description__ = (
-    "解析 B 站视频链接/分享卡片并回复视频；默认不解析，"
+    "解析 B 站视频 / 小红书图文与视频并回复；默认不解析，"
     "/parser at|always 按会话开启（off/at/always 三档）。"
 )
 
@@ -119,12 +119,35 @@ class LinkParserPluginConfig(BaseModel):
         default=False,
         description="发送成功后删除本地缓存文件（不再跨会话/重启复用）。",
     )
+    xiaohongshu_cookie: str = Field(
+        default="",
+        description="小红书网页 cookie 串（可选，用于绕过风控；从浏览器复制 a1/web_session 等）。",
+    )
+    xhs_max_images: int = Field(
+        default=9,
+        ge=1,
+        le=30,
+        description="小红书图文笔记最多取前 N 张。",
+    )
+    xhs_image_mode: Literal["long", "raw"] = Field(
+        default="long",
+        description="long=拼成一张长图发送（省消息资源）；raw=逐张发送。",
+    )
+    xhs_stitch_max_height: int = Field(
+        default=12000,
+        ge=2000,
+        le=60000,
+        description="长图拼接最大高度（px），超限会整体等比缩小。",
+    )
 
 
 __plugin_config_class__ = LinkParserPluginConfig
 
 _client_global: Any | None = None
 """Shared BilibiliClient kept for teardown; replaced on every setup()."""
+
+_xhs_client_global: Any | None = None
+"""Shared Xiaohongshu client kept for teardown; replaced on every setup()."""
 
 _USAGE_TEXT = (
     "/parser off|at|always|status —— "
@@ -163,12 +186,12 @@ def _file_size_mb(path: Path) -> int:
 
 
 def setup(plg: Plugin) -> None:
-    """Register the parser command, route and shared client.
+    """Register the parser command, route and shared clients.
 
     Framework and third-party imports happen here (not at module import time)
     so the package stays importable in plain unit tests.
     """
-    global _client_global
+    global _client_global, _xhs_client_global
 
     from shinbot.core.dispatch.routing import RouteCondition, RouteMatchMode
 
@@ -177,6 +200,7 @@ def setup(plg: Plugin) -> None:
     from .matcher import build_link_matcher
     from .parsers import prune_video_cache
     from .session_state import SessionStateStore
+    from .xiaohongshu import XHSClient
 
     config = _load_plugin_config(plg.plugin_id)
 
@@ -186,6 +210,8 @@ def setup(plg: Plugin) -> None:
     )
     client = BilibiliClient(cookie=config.bilibili_cookie, logger=plg.logger)
     _client_global = client
+    xhs_client = XHSClient(cookie=config.xiaohongshu_cookie, logger=plg.logger)
+    _xhs_client_global = xhs_client
     debouncer = Debouncer(config.debounce_seconds)
     matcher = build_link_matcher(
         enabled=config.enabled,
@@ -210,12 +236,14 @@ def setup(plg: Plugin) -> None:
         match_mode=RouteMatchMode.NORMAL,
     )
     async def linkparser_route(context: Any, _rule: Any) -> None:
-        await _handle_message(plg, config, state, client, debouncer, context)
+        await _handle_message(
+            plg, config, state, client, xhs_client, debouncer, context
+        )
 
     @plg.on_command(
         "parser",
         aliases=["linkparser"],
-        description="设置当前会话的 B 站链接解析档位（off/at/always）",
+        description="设置当前会话的 B 站/小红书解析档位（off/at/always）",
         usage="/parser off|at|always|status",
         permission="cmd.linkparser",
     )
@@ -223,10 +251,9 @@ def setup(plg: Plugin) -> None:
         await _handle_parser_command(ctx, args, state=state, logger=plg.logger)
 
     plg.logger.info(
-        "LinkParser loaded (Bilibili video; default_mode=%s, parse_reply=%s, prefer_mp4=%s)",
+        "LinkParser loaded (bilibili+xhs; default_mode=%s, parse_reply=%s)",
         config.default_mode,
         config.parse_reply,
-        config.prefer_mp4,
     )
 
 
@@ -268,15 +295,17 @@ async def _handle_message(
     config: LinkParserPluginConfig,
     state: Any,
     client: Any,
+    xhs_client: Any,
     debouncer: Any,
     context: Any,
 ) -> None:
-    """Parse the resolved Bilibili link for a matched message and reply."""
+    """Parse the resolved link for a matched message and reply with media."""
     from shinbot.schema.elements import MessageElement
 
     from .bilibili import BilibiliError, ffmpeg_available
     from .parse_policy import make_db_quote_resolver, parse_candidates_for, visible_mentions_bot
-    from .parsers import delete_cached_file, parse_video
+    from .parsers import delete_cached_file, parse_video, parse_xhs_note
+    from .xiaohongshu import XHSError
 
     message_context = context.require_message_context()
     elements = message_context.message.elements
@@ -304,98 +333,138 @@ async def _handle_message(
         return
     debouncer.remember(session_id, link_key)
 
+    is_video = True
+    files: list[Path] = []
+    title = "视频"
+    page_url = ""
+    resolved_resource: str | None = None
+
     try:
-        outcome = await parse_video(
-            client,
-            candidate,
-            data_dir=Path(plg.data_dir),
-            max_duration_seconds=config.max_duration_seconds,
-            max_size_mb=config.max_size_mb,
-            prefer_mp4=config.prefer_mp4,
-            max_quality=config.max_quality,
-            cache_max_files=config.cache_max_files,
-            max_send_mb=config.max_send_mb,
-            compress=config.compress,
-            compress_max_height=config.compress_max_height,
-        )
+        if candidate.platform == "xiaohongshu":
+            outcome = await parse_xhs_note(
+                xhs_client,
+                candidate,
+                data_dir=Path(plg.data_dir),
+                image_mode=config.xhs_image_mode,
+                max_images=config.xhs_max_images,
+                stitch_max_height=config.xhs_stitch_max_height,
+                max_send_mb=config.max_send_mb,
+                compress=config.compress,
+                compress_max_height=config.compress_max_height,
+            )
+            files = [Path(path) for path in outcome.files]
+            is_video = outcome.kind == "video"
+            title = outcome.info.display_title or "小红书笔记"
+            page_url = outcome.info.page_url
+            resolved_resource = f"xiaohongshu:post:{outcome.info.note_id}"
+        else:
+            outcome = await parse_video(
+                client,
+                candidate,
+                data_dir=Path(plg.data_dir),
+                max_duration_seconds=config.max_duration_seconds,
+                max_size_mb=config.max_size_mb,
+                prefer_mp4=config.prefer_mp4,
+                max_quality=config.max_quality,
+                cache_max_files=config.cache_max_files,
+                max_send_mb=config.max_send_mb,
+                compress=config.compress,
+                compress_max_height=config.compress_max_height,
+            )
+            files = [outcome.path]
+            title = outcome.meta.display_title or "视频"
+            page_url = outcome.meta.page_url
+            resolved_resource = (
+                f"bilibili:video:{outcome.meta.bvid}:p{outcome.meta.page}"
+            )
     except asyncio.CancelledError:
         debouncer.forget(session_id, link_key)
         raise
     except Exception as exc:
         debouncer.forget(session_id, link_key)
-        if isinstance(exc, BilibiliError):
+        if isinstance(exc, (BilibiliError, XHSError)):
             message = str(exc)
         else:
             plg.logger.exception("LinkParser parse failure")
-            message = "解析视频时发生未知错误，请稍后再试。"
+            message = "解析内容时发生未知错误，请稍后再试。"
         await _safe_send(message_context, message, plg.logger, "parse-error")
         return
 
     # ── reply ─────────────────────────────────────────────────────────
-    size_mb = _file_size_mb(outcome.path)
-    if config.max_send_mb > 0 and size_mb > config.max_send_mb:
-        # Still over the send cap after (attempted) compression — reply with a
-        # link. Usually this means ffmpeg is missing / compression disabled.
-        title = outcome.meta.display_title or "视频"
-        hint = ""
-        if config.compress and not ffmpeg_available():
-            hint = "\n（安装 ffmpeg 后本插件可自动压缩后直发）"
-        plg.logger.info(
-            "LinkParser video %s is %dMB > max_send_mb=%d; sending text fallback",
-            outcome.path.name,
-            size_mb,
-            config.max_send_mb,
-        )
-        await _safe_send(
-            message_context,
-            f"{title}（{size_mb}MB，超过直发上限 {config.max_send_mb}MB）\n"
-            f"{outcome.meta.page_url}{hint}",
-            plg.logger,
-            "oversize-fallback",
-        )
-        debouncer.forget(session_id, link_key)
-        return
+    if is_video:
+        size_mb = _file_size_mb(files[0]) if files else 0
+        if config.max_send_mb > 0 and size_mb > config.max_send_mb:
+            # Still over the send cap after (attempted) compression — reply
+            # with a link. Usually ffmpeg is missing or compression disabled.
+            hint = ""
+            if config.compress and not ffmpeg_available():
+                hint = "\n（安装 ffmpeg 后本插件可自动压缩后直发）"
+            plg.logger.info(
+                "LinkParser video %s is %dMB > max_send_mb=%d; text fallback",
+                files[0].name if files else "?",
+                size_mb,
+                config.max_send_mb,
+            )
+            await _safe_send(
+                message_context,
+                f"{title}（{size_mb}MB，超过直发上限 {config.max_send_mb}MB）\n{page_url}{hint}",
+                plg.logger,
+                "oversize-fallback",
+            )
+            debouncer.forget(session_id, link_key)
+            return
 
-    resource_key = f"bilibili:video:{outcome.meta.bvid}:p{outcome.meta.page}"
+    elements_payload = []
+    for path in files:
+        if is_video:
+            elements_payload.append(MessageElement.video(str(path)))
+        else:
+            elements_payload.append(MessageElement.img(str(path)))
+
     try:
-        await message_context.send([MessageElement.video(str(outcome.path))])
+        await message_context.send(elements_payload)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         # Platform send failed (timeout/disconnect/etc.). Never let this
-        # escape: keep the cached file, forget debounce so a re-share can
+        # escape: keep the cached files, forget debounce so a re-share can
         # retry, and attempt an informational text reply if possible.
         plg.logger.warning(
-            "LinkParser video send failed (%s): %s", type(exc).__name__, exc
+            "LinkParser media send failed (%s): %s", type(exc).__name__, exc
         )
         debouncer.forget(session_id, link_key)
-        debouncer.forget(session_id, resource_key)
+        if resolved_resource:
+            debouncer.forget(session_id, resolved_resource)
         if config.fallback_to_text:
-            title = outcome.meta.display_title or "视频"
             await _safe_send(
                 message_context,
-                f"{title}\n{outcome.meta.page_url}",
+                f"{title}\n{page_url}",
                 plg.logger,
                 "send-fallback",
             )
         return
 
     # Send succeeded; remember the canonical resource for dedupe (unless the
-    # file was deleted right after sending).
+    # files were deleted right after sending).
     if config.delete_after_send:
-        if delete_cached_file(outcome.path):
-            plg.logger.debug("LinkParser removed sent video cache: %s", outcome.path)
-        debouncer.forget(session_id, resource_key)
-    else:
-        debouncer.remember(session_id, resource_key)
+        for path in files:
+            if delete_cached_file(path):
+                plg.logger.debug("LinkParser removed sent cache: %s", path)
+        if resolved_resource:
+            debouncer.forget(session_id, resolved_resource)
+    elif resolved_resource:
+        debouncer.remember(session_id, resolved_resource)
 
 
 async def on_disable(_plg: Plugin) -> None:
-    """Close the shared Bilibili client when the plugin is disabled."""
-    global _client_global
-    client = _client_global
+    """Close the shared platform clients when the plugin is disabled."""
+    global _client_global, _xhs_client_global
+    clients = [_client_global, _xhs_client_global]
     _client_global = None
-    if client is not None:
+    _xhs_client_global = None
+    for client in clients:
+        if client is None:
+            continue
         try:
             await client.close()
         except Exception:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -382,15 +382,43 @@ def iter_element_texts(
             stack.extend((child, in_quote) for child in reversed(children))
 
 
+def _candidate_key(candidate: LinkCandidate) -> tuple[str, str, str, int]:
+    """Dedupe key for a candidate (platform + id + page)."""
+    identifier = candidate.bvid
+    if not identifier and candidate.avid is not None:
+        identifier = f"av{candidate.avid}"
+    if not identifier and candidate.platform == "xiaohongshu":
+        identifier = candidate.note_id or f"xhslink:{candidate.short_code}"
+    if not identifier and candidate.short_code:
+        identifier = f"redirect:{candidate.short_code}"
+    return (candidate.platform, candidate.kind, identifier or candidate.matched, candidate.page)
+
+
+def _collect_elements(
+    elements: Sequence[Any],
+    *,
+    include_quote: bool,
+    extractor: Callable[[str], list[LinkCandidate]],
+) -> list[LinkCandidate]:
+    """Collect candidates from message elements via a text extractor."""
+    collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
+    for kind, payload in iter_element_texts(elements, include_quote=include_quote):
+        if kind == "text":
+            candidates = extractor(payload)
+        else:
+            url = ark_extract_url(payload)
+            candidates = extractor(url) if url else []
+        for candidate in candidates:
+            collected.setdefault(_candidate_key(candidate), candidate)
+    return list(collected.values())
+
+
 def collect_bilibili_candidates(
     elements: Sequence[Any],
     *,
     include_quote: bool = False,
 ) -> list[LinkCandidate]:
     """Collect deduplicated Bilibili candidates from a message element list.
-
-    Scans plain text elements and ``sb:ark`` share cards (whose JSON may embed
-    a jump URL). Duplicates found across text and cards collapse into one.
 
     Args:
         elements: Message element list (duck-typed or plain dicts).
@@ -399,23 +427,28 @@ def collect_bilibili_candidates(
     Returns:
         The collected candidates, in scanning order.
     """
-    collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
-    for kind, payload in iter_element_texts(elements, include_quote=include_quote):
-        if kind == "text":
-            candidates = find_bilibili_candidates(payload)
-        else:
-            url = ark_extract_url(payload)
-            candidates = find_bilibili_candidates(url) if url else []
-        for candidate in candidates:
-            key = (
-                candidate.platform,
-                candidate.kind,
-                candidate.bvid
-                or (f"av{candidate.avid}" if candidate.avid else f"b23:{candidate.short_code}"),
-                candidate.page,
-            )
-            collected.setdefault(key, candidate)
-    return list(collected.values())
+    return _collect_elements(
+        elements, include_quote=include_quote, extractor=find_bilibili_candidates
+    )
+
+
+def collect_supported_candidates(
+    elements: Sequence[Any],
+    *,
+    include_quote: bool = False,
+) -> list[LinkCandidate]:
+    """Collect deduplicated candidates for every supported platform.
+
+    Args:
+        elements: Message element list (duck-typed or plain dicts).
+        include_quote: Whether to include links inside quoted messages.
+
+    Returns:
+        The collected candidates (bilibili + xiaohongshu), in scan order.
+    """
+    return _collect_elements(
+        elements, include_quote=include_quote, extractor=find_supported_candidates
+    )
 
 
 def iter_quote_elements(elements: Sequence[Any]) -> Iterator[tuple[str | None, Sequence[Any]]]:
@@ -441,27 +474,28 @@ def iter_quote_elements(elements: Sequence[Any]) -> Iterator[tuple[str | None, S
             stack.extend(children)
 
 
-def collect_bilibili_candidates_in_quotes(elements: Sequence[Any]) -> list[LinkCandidate]:
-    """Collect candidates from quoted-message content only (quote subtrees).
-
-    Args:
-        elements: Message element list (duck-typed or plain dicts).
-
-    Returns:
-        Deduplicated candidates found inside any ``quote`` element children.
-    """
+def _collect_from_quotes(
+    elements: Sequence[Any],
+    extractor: Callable[[str], list[LinkCandidate]],
+) -> list[LinkCandidate]:
+    """Collect candidates from quoted-message content only (quote subtrees)."""
     collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
     for _quote_id, children in iter_quote_elements(elements):
-        for candidate in collect_bilibili_candidates(children):
-            key = (
-                candidate.platform,
-                candidate.kind,
-                candidate.bvid
-                or (f"av{candidate.avid}" if candidate.avid else f"b23:{candidate.short_code}"),
-                candidate.page,
-            )
-            collected.setdefault(key, candidate)
+        for candidate in _collect_elements(children, include_quote=False, extractor=extractor):
+            collected.setdefault(_candidate_key(candidate), candidate)
     return list(collected.values())
+
+
+def collect_bilibili_candidates_in_quotes(elements: Sequence[Any]) -> list[LinkCandidate]:
+    """Collect Bilibili candidates from quote subtrees only."""
+    return _collect_from_quotes(elements, find_bilibili_candidates)
+
+
+def collect_supported_candidates_in_quotes(
+    elements: Sequence[Any],
+) -> list[LinkCandidate]:
+    """Collect supported-platform candidates from quote subtrees only."""
+    return _collect_from_quotes(elements, find_supported_candidates)
 
 
 def merge_candidates(*groups: Sequence[LinkCandidate]) -> list[LinkCandidate]:
@@ -469,12 +503,77 @@ def merge_candidates(*groups: Sequence[LinkCandidate]) -> list[LinkCandidate]:
     collected: dict[tuple[str, str, str, int], LinkCandidate] = {}
     for group in groups:
         for candidate in group:
-            key = (
-                candidate.platform,
-                candidate.kind,
-                candidate.bvid
-                or (f"av{candidate.avid}" if candidate.avid else f"b23:{candidate.short_code}"),
-                candidate.page,
-            )
-            collected.setdefault(key, candidate)
+            collected.setdefault(_candidate_key(candidate), candidate)
     return list(collected.values())
+
+
+# ── Xiaohongshu (小红书) scanning ──────────────────────────────────────
+
+_XHS_NOTE_RE = re.compile(
+    r"(?<![0-9A-Za-z.])"
+    r"(?:https?://)?(?:www\.)?xiaohongshu\.com/"
+    r"(?P<kind>explore|discovery/item)/"
+    r"(?P<id>[0-9A-Za-z]+)",
+    re.IGNORECASE,
+)
+_XHSLINK_RE = re.compile(
+    r"(?<![0-9A-Za-z.])"
+    r"(?:https?://)?xhslink\.(?:com|cn)/"
+    r"(?P<code>[0-9A-Za-z]+(?:/[0-9A-Za-z]+)*)",
+    re.IGNORECASE,
+)
+
+
+def _xhs_page_url(token: str) -> str:
+    """Normalise a xiaohongshu note token into a fetchable page URL."""
+    parsed = urlparse(token)
+    path = parsed.path
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"https://www.xiaohongshu.com{path}{query}"
+
+
+def find_xhs_candidates(text: str) -> list[LinkCandidate]:
+    """Scan *text* for Xiaohongshu note links.
+
+    Handles direct ``xiaohongshu.com/explore|discovery/item/<id>?...`` URLs
+    (the query usually carries the required ``xsec_token``) and
+    ``xhslink.com|xhslink.cn`` short links that need a redirect first.
+
+    Args:
+        text: The message text to scan.
+
+    Returns:
+        Deduplicated Xiaohongshu candidates.
+    """
+    if not text:
+        return []
+    candidates: dict[tuple[str, str, str, int], LinkCandidate] = {}
+    for match in _XHS_NOTE_RE.finditer(text):
+        token = text[match.start() : _token_end(text, match.start())]
+        note_id = match.group("id")
+        candidate = LinkCandidate(
+            platform="xiaohongshu",
+            kind="post",
+            matched=token,
+            note_id=note_id,
+            note_url=_xhs_page_url(token),
+        )
+        candidates.setdefault(_candidate_key(candidate), candidate)
+    for match in _XHSLINK_RE.finditer(text):
+        token = text[match.start() : _token_end(text, match.start())]
+        candidate = LinkCandidate(
+            platform="xiaohongshu",
+            kind="post",
+            matched=token,
+            short_code=match.group("code").split("/")[-1],
+        )
+        candidates.setdefault(_candidate_key(candidate), candidate)
+    return list(candidates.values())
+
+
+def find_supported_candidates(text: str) -> list[LinkCandidate]:
+    """Scan *text* for any supported platform (bilibili + xiaohongshu)."""
+    return merge_candidates(
+        find_bilibili_candidates(text),
+        find_xhs_candidates(text),
+    )

@@ -1,14 +1,17 @@
 # LinkParser (shinbot_plugin_linkparser)
 
-ShinBot 插件：解析 **Bilibili 视频**（链接 / `BV`/`av` 号 / `b23.tv` 短链 / QQ 分享卡片，含 `?p=N` 分 P），
-下载为可播放 mp4 后**以视频消息回复**。
+ShinBot 插件：解析分享内容并回复可消费媒体——
+
+- **Bilibili 视频**（链接 / `BV`/`av` 号 / `b23.tv` 短链 / QQ 分享卡片，含 `?p=N`）→ 下载为可播放 mp4 后直发；
+- **小红书笔记**（`xiaohongshu.com`/`xhslink.com` 链接或分享卡片）→ 图文笔记拼成**一张长图**直发（可改逐张），
+  视频笔记经 HLS 下载后直发（自动压缩）。
 
 **默认不解析**。解析档位按会话设置（三档），状态持久化：
 
 | 档位 | 行为 |
 |---|---|
 | `off` | 不解析（默认） |
-| `at` | **仅当消息 @了本机器人** 时解析：查消息自身文本里的链接；若该 @ 消息是引用回复，则解析其**引用的消息内容**（经 message_logs 精确判定，无链接的 @ 提问不会被吞） |
+| `at` | 仅当消息 @了本机器人 时解析：查消息自身文本里的链接；若该 @ 消息是引用回复，则解析其**引用的消息内容**（经 message_logs 精确判定，无链接的 @ 提问不会被吞） |
 | `always` | **总是解析**链接消息（含 QQ 分享卡片）；引用回复内容在 `parse_reply=true` 时一并解析 |
 
 ## 指令
@@ -48,7 +51,7 @@ curl -X POST http://localhost:3945/api/v1/plugins/shinbot_plugin_linkparser/enab
 https://www.bilibili.com/video/BV1xx411c7mD?p=2
 ```
 
-机器人解析并回复可播放的视频消息（超过 `max_send_mb` 的会自动压缩后直发，不必上传原画）。
+机器人解析并回复可播放的内容（B站视频；小红书图文→长图 / 视频；视频超过 `max_send_mb` 会自动压缩后直发，不必上传原画）。
 同一会话短时间重复链接不重复解析；
 已下载视频按 `bv号_pN.mp4` 缓存复用（重启后不再重新下载，压缩版本也会缓存），目录按 `cache_max_files` 自动清理；
 发送成功后不删除缓存，若想零留存把 `delete_after_send` 设为 `true`。
@@ -81,6 +84,10 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `debounce_seconds` | `300` | 同一会话同一链接/资源防抖窗口（秒），0=关闭 |
 | `cache_max_files` | `50` | videos 缓存目录保留的 mp4 文件数上限，0=不清理 |
 | `delete_after_send` | `false` | 发送成功后删除本地缓存文件（不再跨会话/重启复用） |
+| `xiaohongshu_cookie` | `""` | 小红书网页 cookie（可选，绕过风控） |
+| `xhs_max_images` | `9` | 图文笔记最多取前 N 张 |
+| `xhs_image_mode` | `"long"` | 图文发送方式：`long`=拼一张长图；`raw`=逐张 |
+| `xhs_stitch_max_height` | `12000` | 长图最大高度 px（超限等比缩小） |
 
 ## 开发
 

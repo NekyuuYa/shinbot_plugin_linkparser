@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 from .bilibili import (
     BilibiliClient,
@@ -17,7 +18,7 @@ from .bilibili import (
     download_plan_to_file,
     ffmpeg_available,
 )
-from .models import LinkCandidate, ParseOutcome, VideoMeta
+from .models import LinkCandidate, ParseOutcome, VideoMeta, XHSOutcome
 from .urls import find_bilibili_candidates
 
 logger = logging.getLogger("shinbot_plugin_linkparser.parsers")
@@ -221,3 +222,120 @@ def _video_file_name(meta: VideoMeta) -> str:
     """Build a deterministic, safe output file name for a video part."""
     identifier = (meta.bvid or f"av{meta.avid}").lower()
     return f"{identifier}_p{meta.page}.mp4"
+
+
+async def parse_xhs_note(
+    xhs_client: Any,
+    candidate: LinkCandidate,
+    *,
+    data_dir: Path,
+    image_mode: str = "long",
+    max_images: int = 9,
+    stitch_max_height: int = 12000,
+    max_send_mb: int = 0,
+    compress: bool = True,
+    compress_max_height: int = 720,
+) -> XHSOutcome:
+    """Resolve and download a Xiaohongshu note (video or image gallery).
+
+    Steps: expand ``xhslink`` short links → fetch note info from the page's
+    ``__INITIAL_STATE__`` → video notes are downloaded via HLS (ffmpeg) and
+    compressed toward *max_send_mb*; image notes are downloaded and, when
+    *image_mode* is ``long``, stitched into a single long image.
+
+    Args:
+        xhs_client: Initialised Xiaohongshu client.
+        candidate: The note link candidate.
+        data_dir: Plugin data directory (``xhs/`` is created below it).
+        image_mode: ``"long"`` to stitch galleries into one image, ``"raw"``
+            to keep individual images.
+        max_images: Maximum number of gallery images to fetch.
+        stitch_max_height: Height cap for stitched long images.
+        max_send_mb: Send size cap for video notes (0 disables compression).
+        compress: Allow compression toward the send cap.
+        compress_max_height: Max height for compressed video.
+
+    Returns:
+        An :class:`XHSOutcome` describing the produced local files.
+
+    Raises:
+        XHSError / BilibiliError: On failure, with a user-facing message.
+    """
+    from .bilibili import compress_to_target, probe_duration_seconds
+    from .urls import find_xhs_candidates
+    from .xiaohongshu import (
+        XHSError,
+        download_hls_video,
+        download_note_image,
+        stitch_to_long_image,
+    )
+
+    resolved = candidate
+    if candidate.needs_redirect:
+        canonical = await xhs_client.resolve_short_url(candidate.matched)
+        for found in find_xhs_candidates(canonical):
+            if found.note_id is not None or found.note_url is not None:
+                resolved = found
+                break
+        else:
+            raise XHSError("小红书短链接跳转后未能识别笔记 ID。")
+
+    note_url = resolved.note_url
+    if not note_url:
+        raise XHSError("无法识别该链接对应的小红书笔记。")
+    info = await xhs_client.fetch_note(note_url, note_id=resolved.note_id)
+
+    base_dir = Path(data_dir) / "xhs"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    note_key = info.note_id or resolved.note_id or "note"
+
+    if info.note_type == "video":
+        if not info.video_master_url:
+            raise XHSError("该视频笔记暂无可用的播放流（可能已删除或需登录）。")
+        dest = base_dir / f"{note_key}_video.mp4"
+        if not _reusable_video(dest):
+            downloaded = await download_hls_video(
+                info.video_master_url, dest, cookie=xhs_client.cookie
+            )
+            if not downloaded:
+                raise XHSError("小红书视频下载失败（可能受保护或 ffmpeg 缺失）。")
+        if max_send_mb > 0 and compress and _file_size_mb(dest) > max_send_mb:
+            duration = await probe_duration_seconds(dest)
+            if duration and duration > 0:
+                await compress_to_target(
+                    dest,
+                    dest,
+                    target_bytes=max_send_mb * 1024 * 1024,
+                    duration_seconds=int(duration),
+                    max_height=compress_max_height,
+                )
+        return XHSOutcome(kind="video", files=[dest], info=info)
+
+    if not info.image_urls:
+        raise XHSError("该小红书笔记没有可下载的图片/视频内容。")
+    image_paths: list[Path] = []
+    for index, url in enumerate(info.image_urls[:max_images], start=1):
+        dest = base_dir / f"{note_key}_{index}.jpg"
+        if dest.is_file() and dest.stat().st_size > 0:
+            image_paths.append(dest)
+            continue
+        try:
+            await download_note_image(xhs_client.http, url, dest)
+            image_paths.append(dest)
+        except XHSError as exc:
+            logger.warning("xhs image %d download failed: %s", index, exc)
+            continue
+    if not image_paths:
+        raise XHSError("小红书图片下载失败（可能被风控或链接已失效）。")
+
+    if image_mode == "long" and len(image_paths) > 1:
+        stitched = base_dir / f"{note_key}_long.jpg"
+        out = stitch_to_long_image(
+            image_paths,
+            stitched,
+            max_height=stitch_max_height,
+        )
+        if out is not None:
+            return XHSOutcome(kind="images", files=[out], info=info)
+        logger.info("xhs stitch unavailable; sending raw images")
+    return XHSOutcome(kind="images", files=image_paths, info=info)

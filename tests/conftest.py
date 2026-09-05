@@ -33,6 +33,10 @@ class MessageElement:
     def video(cls, src: str, **kwargs: object) -> dict[str, object]:
         return {"type": "video", "attrs": {"src": src, **kwargs}, "children": []}
 
+    @classmethod
+    def img(cls, src: str, **kwargs: object) -> dict[str, object]:
+        return {"type": "img", "attrs": {"src": src, **kwargs}, "children": []}
+
 
 elements_module.__dict__["MessageElement"] = MessageElement
 sys.modules.setdefault("shinbot", shinbot_module)

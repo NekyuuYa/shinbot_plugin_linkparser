@@ -7,7 +7,12 @@ from .client import (
     SingleFilePlan,
     VideoMeta,
 )
-from .download import compress_to_target, download_plan_to_file, ffmpeg_available
+from .download import (
+    compress_to_target,
+    download_plan_to_file,
+    ffmpeg_available,
+    probe_duration_seconds,
+)
 
 __all__ = [
     "BilibiliClient",
@@ -18,4 +23,5 @@ __all__ = [
     "compress_to_target",
     "download_plan_to_file",
     "ffmpeg_available",
+    "probe_duration_seconds",
 ]

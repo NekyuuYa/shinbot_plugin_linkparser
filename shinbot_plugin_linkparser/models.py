@@ -11,43 +11,86 @@ from dataclasses import dataclass, field
 
 @dataclass(slots=True, frozen=True)
 class LinkCandidate:
-    """A link found inside a message that may point to a Bilibili video.
+    """A link found inside a message that may point to parseable content.
 
     Attributes:
-        platform: Source platform name (``"bilibili"``).
-        kind: Content kind (``"video"``).
+        platform: Source platform name (``"bilibili"`` / ``"xiaohongshu"``).
+        kind: Content kind (``"video"`` / ``"post"``).
+        matched: Raw matched snippet (used for logging and debounce keys).
         bvid: Bilibili video id (``BV...``) when directly present.
         avid: Bilibili ``av`` id when directly present.
         page: 1-based part/page number requested.
-        matched: Raw matched snippet (used for logging and debounce keys).
-        short_code: ``b23.tv`` code when the link needs a redirect first.
+        short_code: Redirect code (``b23.tv`` or ``xhslink``) when the link
+            needs a redirect first.
+        note_id: Xiaohongshu note id when directly present.
+        note_url: Full Xiaohongshu note URL (incl. ``xsec_token``) when known.
     """
 
     platform: str
     kind: str
-    bvid: str | None
-    avid: int | None
-    page: int = 1
     matched: str = ""
+    bvid: str | None = None
+    avid: int | None = None
+    page: int = 1
     short_code: str | None = None
+    note_id: str | None = None
+    note_url: str | None = None
 
     @property
     def needs_redirect(self) -> bool:
         """Return True when the candidate must be resolved via redirect first."""
         return self.short_code is not None
 
-    def resource_key(self, *, resolved_bvid: str | None = None) -> str:
+    def resource_key(
+        self,
+        *,
+        resolved_bvid: str | None = None,
+        resolved_note_id: str | None = None,
+    ) -> str:
         """Dedupe key identifying the underlying resource.
 
-        Uses the resolved BV when available (short links share the same
-        resource as their canonical target), otherwise the id found inline.
+        Uses resolved ids when available (short links share the resource of
+        their canonical target), otherwise the id found inline.
         """
+        if self.platform == "xiaohongshu":
+            note_id = resolved_note_id or self.note_id
+            if note_id:
+                return f"xiaohongshu:post:{note_id}"
+            return f"xiaohongshu:unknown:{self.matched}"
         bvid = resolved_bvid or self.bvid
         if bvid:
             return f"bilibili:video:{bvid}:p{self.page}"
         if self.avid:
             return f"bilibili:video:av{self.avid}:p{self.page}"
         return f"bilibili:video:unknown:{self.matched}"
+
+
+@dataclass(slots=True)
+class XHSNoteInfo:
+    """Parsed Xiaohongshu note content (subset of the page state)."""
+
+    note_id: str
+    note_type: str  # "normal" (image gallery) or "video"
+    title: str
+    desc: str
+    author: str
+    image_urls: list[str] = field(default_factory=list)
+    video_master_url: str | None = None
+    page_url: str = ""
+
+    @property
+    def display_title(self) -> str:
+        """Return the note title or a fallback label."""
+        return self.title or "小红书笔记"
+
+
+@dataclass(slots=True)
+class XHSOutcome:
+    """Result of parsing a Xiaohongshu note into local files."""
+
+    kind: str  # "video" | "images"
+    files: list[object]  # list[pathlib.Path]
+    info: XHSNoteInfo
 
 
 @dataclass(slots=True)

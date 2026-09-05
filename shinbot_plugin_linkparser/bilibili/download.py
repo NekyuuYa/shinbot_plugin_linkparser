@@ -258,3 +258,32 @@ async def compress_to_target(
         if asyncio.current_task() is not None and asyncio.current_task().cancelling():
             raise
         return False
+
+
+async def probe_duration_seconds(path: Path) -> float | None:
+    """Return media duration in seconds via ffprobe (None on any failure)."""
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    command = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await process.communicate()
+        if process.returncode != 0:
+            return None
+        return float(stdout.decode(errors="ignore").strip())
+    except (OSError, ValueError, asyncio.CancelledError):
+        return None

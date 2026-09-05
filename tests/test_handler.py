@@ -104,9 +104,11 @@ def handler_env(tmp_path, monkeypatch):
     return plg, config, state, debouncer, client
 
 
-def _run(plg, config, state, debouncer, client, ctx) -> None:
+def _run(plg, config, state, debouncer, client, ctx, xhs_client=None) -> None:
     asyncio.run(
-        plugin._handle_message(plg, config, state, client, debouncer, ctx)
+        plugin._handle_message(
+            plg, config, state, client, xhs_client or object(), debouncer, ctx
+        )
     )
 
 
@@ -154,3 +156,48 @@ def test_oversize_video_skips_send_and_replies_link(handler_env, monkeypatch) ->
     assert LINK_URL in text
     # not the video element list
     assert isinstance(ctx.sent[0], str)
+
+
+def test_xhs_image_note_sends_images(handler_env, monkeypatch, tmp_path) -> None:
+    """Xiaohongshu image-gallery outcome is sent as image elements."""
+    plg, config, state, debouncer, client = handler_env
+    image_path = tmp_path / "note_long.jpg"
+    image_path.write_bytes(b"image-bytes")
+
+    from shinbot_plugin_linkparser.models import XHSNoteInfo, XHSOutcome
+
+    async def fake_parse_xhs(*_args, **_kwargs) -> XHSOutcome:
+        return XHSOutcome(
+            kind="images",
+            files=[image_path],
+            info=XHSNoteInfo(
+                note_id="n1",
+                note_type="normal",
+                title="笔记",
+                desc="",
+                author="up",
+                image_urls=[],
+                page_url="https://www.xiaohongshu.com/explore/n1",
+            ),
+        )
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+
+    ctx = MessageContext()
+    ctx.message = SimpleNamespace(
+        elements=[
+            {
+                "type": "text",
+                "attrs": {"content": "https://www.xiaohongshu.com/explore/n1?xsec_token=a"},
+                "children": [],
+            }
+        ]
+    )
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    payload = ctx.sent[0]
+    assert isinstance(payload, list)
+    assert payload[0]["type"] == "img"
+    resource = "xiaohongshu:post:n1"
+    assert debouncer.hit("g:1", resource) is True

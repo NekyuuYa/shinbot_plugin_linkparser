@@ -27,8 +27,8 @@ from typing import Any, Literal
 
 from .models import LinkCandidate
 from .urls import (
-    collect_bilibili_candidates,
-    collect_bilibili_candidates_in_quotes,
+    collect_supported_candidates,
+    collect_supported_candidates_in_quotes,
     iter_quote_elements,
     merge_candidates,
 )
@@ -98,7 +98,7 @@ def _collect_quoted(
     resolve_quote: QuoteResolver | None,
 ) -> list[LinkCandidate]:
     """Collect candidates from quote subtrees plus DB-resolved quote content."""
-    groups: list[list[LinkCandidate]] = [collect_bilibili_candidates_in_quotes(elements)]
+    groups: list[list[LinkCandidate]] = [collect_supported_candidates_in_quotes(elements)]
     if resolve_quote is not None:
         for quote_id, _children in iter_quote_elements(elements):
             if not quote_id:
@@ -109,7 +109,7 @@ def _collect_quoted(
                 logger.debug("quote resolve failed for %s", quote_id, exc_info=True)
                 continue
             if resolved:
-                groups.append(collect_bilibili_candidates(resolved))
+                groups.append(collect_supported_candidates(resolved))
     return merge_candidates(*groups)
 
 
@@ -136,7 +136,7 @@ def parse_candidates_for(
     effective = normalize_mode(mode)
     if effective == "off":
         return []
-    visible = collect_bilibili_candidates(elements, include_quote=False)
+    visible = collect_supported_candidates(elements, include_quote=False)
     if effective == "always":
         if visible:
             return visible
