@@ -231,12 +231,15 @@ def test_xhs_media_folded_into_chat_record(handler_env, monkeypatch, tmp_path) -
     assert len(ctx.sent) == 1
     root = ctx.sent[0][0]
     assert root["attrs"].get("forward") == "true"
-    assert any("笔记标题" in str(node) for node in root["children"])
-    assert any(
-        child.get("type") == "img"
-        for node in root["children"]
-        for child in node.get("children", [])
-    )
+    nodes = root["children"]
+    # caption node first, then one node per image
+    assert "笔记标题" in str(nodes[0])
+    image_nodes = [
+        node
+        for node in nodes[1:]
+        if any(child.get("type") == "img" for child in node.get("children", []))
+    ]
+    assert len(image_nodes) == 1
 
 
 def test_xhs_video_folded_with_caption(handler_env, monkeypatch, tmp_path) -> None:
@@ -406,3 +409,33 @@ def test_x_video_folded_with_forward_adapter(handler_env, monkeypatch, tmp_path)
         for node in root["children"]
         for child in node.get("children", [])
     )
+
+
+def test_multi_image_folded_as_separate_nodes(handler_env, monkeypatch, tmp_path) -> None:
+    """Album style: one chat-record entry per image (no stitching by default)."""
+    plg, config, state, debouncer, client = handler_env
+    images = []
+    for index in range(3):
+        path = tmp_path / f"note_{index}.jpg"
+        path.write_bytes(b"img")
+        images.append(path)
+
+    async def fake_parse_xhs(*_a, **_k):
+        return _xhs_outcome("images", images, tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+    ctx = _xhs_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    nodes = ctx.sent[0][0]["children"]
+    assert "笔记标题" in str(nodes[0])  # caption node
+    image_nodes = [
+        node
+        for node in nodes[1:]
+        if any(child.get("type") == "img" for child in node.get("children", []))
+    ]
+    assert len(image_nodes) == 3
+    for node in image_nodes:
+        assert len([c for c in node["children"] if c.get("type") == "img"]) == 1

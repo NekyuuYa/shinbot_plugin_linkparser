@@ -262,5 +262,6 @@ def test_config_defaults() -> None:
     assert config.x_backend == "auto"
     assert config.send_text is True
     assert config.send_forward is True
-    assert config.x_image_mode == "long"
+    assert config.x_image_mode == "raw"
+    assert config.xhs_image_mode == "raw"
     assert config.x_video_max_height == 720

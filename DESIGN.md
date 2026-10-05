@@ -1,6 +1,6 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**v0.5.2**（180 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
+> 状态：**v0.5.3**（181 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
 > 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图；
 > X 的「文字+媒体」默认折叠为一条聊天记录（合并转发）。真实端到端验证：B站（HTML5/DASH/压缩/卡片）、
 > X（官方 syndication + fxtwitter 兜底、图片与 mp4 下载）、小红书（HTML 解析/图片/长图/HLS）。
@@ -16,7 +16,7 @@
 
 - **Bilibili 视频**：`BV`/`av`、`bilibili.com/video?p=N`、`b23.tv`、`bmBV...`、QQ 分享卡片 → 视频直发。
 - **小红书**：`xiaohongshu.com/(explore|discovery/item)/<id>`（含 `xsec_token`）、`xhslink.com/.cn` 短链、
-  QQ 分享卡片 → **与 X 相同输出**：「作者/标题/正文 + 媒体」折叠成一条聊天记录；图文默认**拼一张长图**（可逐张），
+  QQ 分享卡片 → **与 X 相同输出**：「作者/标题/正文 + 媒体」折叠成一条聊天记录；图文默认**逐张**（不拼图），
   视频优先直链 mp4 下载（HLS 才走 ffmpeg）并按需压缩。
 - **X/Twitter**：`x.com`/`twitter.com`（含 `mobile.`、`/i/status`、`/i/web/status`、legacy `/statuses/`）、
   镜像站 `fxtwitter/vxtwitter/fixupx/fixvx/twittpr` 的 `/status/<id>` → 文字+媒体**折叠聊天记录**；
@@ -86,8 +86,9 @@ shinbot_plugin_linkparser/
   导致无法推断容器"的失败（`ffmpeg_media` 现显式 `-f mp4`）。
 - **X 不拉原画**：`pick_video_variant` 优先「≤`x_video_max_height` 的最高档 mp4」，全部超限则取最小档（省流量），
   无 mp4 才用 HLS（ffmpeg）；仍超 `max_send_mb` 再压缩。图片统一取 `?name=large`（原图 5568px 无必要）。
-- **长图**：`image_mode=long`（小红书 `xhs_image_mode`、X `x_image_mode`）用 Pillow 等比缩放逐图拼接，
-  限总高 `*_stitch_max_height`（超限整体缩小）→ 单图直发；Pillow 缺失或 `raw` 才逐张。
+- **不拼图（默认）**：`xhs_image_mode`/`x_image_mode` 默认 `raw` —— 逐张发送，保留原图与"图文混排"的可能性；
+  折叠记录里**每张图一个 node**（相册式，单条 payload 更小）。Pillow 拼接（`long` + `*_stitch_max_height`）
+  实现保留为可选项，待各平台图文模板能混排后再评估默认开启。
 - **压缩**：`max_send_mb`（默认 50MB）为直发目标；B站用 meta 时长、xhs/x 用 ffprobe 或接口时长反推码率
   （libx264+AAC、`compress_max_height` 限高）。ffmpeg 缺失 → 链接文本 + 提示。
 - **引用解析**：OneBot `reply` 只带 id → `message_logs.get_by_platform_msg_id` 取 `content_json`
@@ -103,9 +104,9 @@ max_duration_seconds=0; max_size_mb=200
 max_send_mb=50; compress=True; compress_max_height=720
 debounce_seconds=300; cache_max_files=50; delete_after_send=False
 xiaohongshu_cookie=""; xhs_max_images=9
-xhs_image_mode="long"; xhs_stitch_max_height=12000; xhs_video_max_height=720
+xhs_image_mode="raw"; xhs_stitch_max_height=12000; xhs_video_max_height=720
 send_text=True; send_forward=True; x_backend="auto"
-x_image_mode="long"; x_video_max_height=720
+x_image_mode="raw"; x_video_max_height=720
 ```
 
 指令 `/parser off|at|always|status`（`on`=always；权限 `cmd.linkparser`，admin/owner 默认）。
@@ -115,7 +116,7 @@ x_image_mode="long"; x_video_max_height=720
 - 仓库 `NekyuuYa/shinbot_plugin_linkparser` + 市场索引 `NekyuuYa/shinbot-plugins`；发版纪律：
   ruff+pytest → bump metadata/pyproject → 推送插件 → 索引 "Bump … to x.y.z"。
 - 依赖：bilibili-api-python、httpx、pydantic、**pillow**；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
-- 测试 180 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
+- 测试 181 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
   session_state、debounce、parsers/handler（分发/超时/断连/超限/长图/X 折叠与降级/纯文字）、bilibili client、
   download/compress（真实 ffmpeg）、xiaohongshu（扫描/HTML/stitch）、twitter（扫描/双通道解析/选档/后端降级/下载）、
   plugin_entry、packaging；XHS 选档/直链下载/ffmpeg `-f mp4` 回归；XHS 与 X 一致的
@@ -126,4 +127,5 @@ x_image_mode="long"; x_video_max_height=720
 
 - **已实现（0.5.x）**：B站视频、小红书图文(长图)/视频、X 推文(折叠聊天记录/长图/视频)、三档会话策略、
   精确 matcher、压缩、防抖、卡片、引用解析、失败链路加固、真实接口端到端验证。
-- **Next**：RenderKit 信息卡、扫码登录态（B站）、i18n、更多平台、X 线程合并、图文原图与去水印策略。
+- **Next**：各平台图文混排模板（就绪后再评估拼长图默认值）、RenderKit 信息卡、扫码登录态（B站）、i18n、
+  更多平台、X 线程合并、图文原图与去水印策略。

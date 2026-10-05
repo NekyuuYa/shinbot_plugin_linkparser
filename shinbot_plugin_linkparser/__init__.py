@@ -130,8 +130,11 @@ class LinkParserPluginConfig(BaseModel):
         description="小红书图文笔记最多取前 N 张。",
     )
     xhs_image_mode: Literal["long", "raw"] = Field(
-        default="long",
-        description="long=拼成一张长图发送（省消息资源）；raw=逐张发送。",
+        default="raw",
+        description=(
+            "raw=逐张发送（默认，保留原图与图文混排空间）；"
+            "long=拼成一张长图（可选，待对应平台图文模板就绪后再考虑默认开启）。"
+        ),
     )
     xhs_stitch_max_height: int = Field(
         default=12000,
@@ -164,8 +167,11 @@ class LinkParserPluginConfig(BaseModel):
         ),
     )
     x_image_mode: Literal["long", "raw"] = Field(
-        default="long",
-        description="X 多图：long=拼成一张长图；raw=逐张发送。",
+        default="raw",
+        description=(
+            "X 多图：raw=逐张发送（默认，保留原图与图文混排空间）；"
+            "long=拼成一张长图（可选）。"
+        ),
     )
     x_video_max_height: int = Field(
         default=720,
@@ -371,12 +377,22 @@ async def _send_folded(
                     [MessageElement.text(caption)], nickname=_FORWARD_NAME
                 )
             )
-        media = [
-            MessageElement.video(str(path)) if is_video else MessageElement.img(str(path))
-            for path in files
-        ]
-        if media:
-            nodes.append(MessageElement.message(media, nickname=_FORWARD_NAME))
+        if is_video:
+            for path in files:
+                nodes.append(
+                    MessageElement.message(
+                        [MessageElement.video(str(path))], nickname=_FORWARD_NAME
+                    )
+                )
+        else:
+            # One chat-record entry per image keeps the album readable and the
+            # per-message payload small (no stitching by default).
+            for path in files:
+                nodes.append(
+                    MessageElement.message(
+                        [MessageElement.img(str(path))], nickname=_FORWARD_NAME
+                    )
+                )
         if not nodes:
             return False
         await message_context.send([MessageElement.forward(nodes)])
