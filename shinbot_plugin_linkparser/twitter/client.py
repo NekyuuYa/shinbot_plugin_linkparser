@@ -67,6 +67,30 @@ def _height_from_url(url: str) -> int | None:
     return None
 
 
+_LABELS = {
+    "government": "政府",
+    "business": "商业",
+    "blue": "",
+    "verified": "",
+    "none": "",
+}
+
+
+def _author_label(verified_type: object) -> str:
+    """Map a verification type to a short caption label ('' when generic)."""
+    if not isinstance(verified_type, str):
+        return ""
+    return _LABELS.get(verified_type.strip().lower(), verified_type.strip())
+
+
+def _fxtwitter_author_label(author: dict) -> str:
+    """Read the account label from an fxtwitter author object."""
+    verification = author.get("verification")
+    if isinstance(verification, dict):
+        return _author_label(verification.get("type"))
+    return ""
+
+
 def _media_available(media: dict) -> bool:
     """Return False when X reports the media as withheld/unavailable."""
     availability = media.get("ext_media_availability")
@@ -175,6 +199,7 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         author_name=str(user.get("name") or ""),
         author_handle=str(user.get("screen_name") or ""),
         created_at=str(data.get("created_at") or ""),
+        author_label=_author_label(user.get("verified_type")),
         sensitive=bool(data.get("possibly_sensitive")),
         media=media_items,
     )
@@ -225,6 +250,7 @@ def parse_fxtwitter(data: dict[str, Any], status_id: str) -> XTweetInfo | None:
         author_name=str(author.get("name") or ""),
         author_handle=str(author.get("screen_name") or ""),
         created_at=str(tweet.get("created_at") or ""),
+        author_label=_fxtwitter_author_label(author),
         sensitive=bool(tweet.get("possibly_sensitive")),
         media=media_items,
     )

@@ -161,6 +161,7 @@ class XTweetInfo:
     author_name: str
     author_handle: str
     created_at: str = ""
+    author_label: str = ""
     sensitive: bool = False
     media: list[XMedia] = field(default_factory=list)
 
@@ -176,9 +177,10 @@ class XTweetInfo:
 
     @property
     def display_title(self) -> str:
-        """Return ``author (@handle)`` for captions and fallbacks."""
+        """Return ``author [label] (@handle)`` for captions and fallbacks."""
+        label = f"[{self.author_label}]" if self.author_label else ""
         handle = f"(@{self.author_handle})" if self.author_handle else ""
-        return f"{self.author_name} {handle}".strip() or "X 推文"
+        return f"{self.author_name} {label} {handle}".replace("  ", " ").strip() or "X 推文"
 
     @property
     def caption(self) -> str:

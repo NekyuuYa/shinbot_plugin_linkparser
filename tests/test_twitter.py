@@ -381,3 +381,47 @@ def test_media_available_defaults_true_without_field() -> None:
     info = parse_syndication(_syndication_payload(), STATUS_ID)
     assert info is not None
     assert all(item.available for item in info.media)
+
+
+# ── account label (verified_type) in captions ─────────────────────────────
+
+
+def test_parse_syndication_reads_government_label() -> None:
+    payload = _syndication_payload()
+    payload["user"]["verified_type"] = "Government"
+    info = parse_syndication(payload, STATUS_ID)
+    assert info is not None
+    assert info.author_label == "政府"
+    assert "[政府]" in info.caption
+    assert "[政府]" in info.display_title
+
+
+def test_parse_fxtwitter_reads_verification_type() -> None:
+    payload = {
+        "tweet": {
+            "url": f"https://x.com/NASA/status/{STATUS_ID}",
+            "text": "hello",
+            "author": {
+                "name": "NASA",
+                "screen_name": "NASA",
+                "verification": {"verified": True, "type": "government"},
+            },
+            "media": {},
+        }
+    }
+    info = parse_fxtwitter(payload, STATUS_ID)
+    assert info is not None and info.author_label == "政府"
+
+
+def test_blue_verification_adds_no_label() -> None:
+    payload = _syndication_payload()
+    payload["user"]["verified_type"] = "Blue"
+    info = parse_syndication(payload, STATUS_ID)
+    assert info is not None
+    assert info.author_label == ""
+    assert "[" not in info.caption
+
+
+def test_no_verification_field_no_label() -> None:
+    info = parse_syndication(_syndication_payload(), STATUS_ID)
+    assert info is not None and info.author_label == ""

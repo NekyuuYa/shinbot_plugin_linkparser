@@ -1,6 +1,6 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**v0.5.6**（194 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
+> 状态：**v0.5.7**（198 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
 > 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图；
 > X 的「文字+媒体」默认折叠为一条聊天记录（合并转发）。真实端到端验证：B站（HTML5/DASH/压缩/卡片）、
 > X（官方 syndication + fxtwitter 兜底、图片与 mp4 下载）、小红书（HTML 解析/图片/长图/HLS）。
@@ -76,9 +76,14 @@ shinbot_plugin_linkparser/
 
 ## 4. 关键决策
 
+- **账号标签**：`author_label` 读取 syndication `user.verified_type` 与 fxtwitter `author.verification.type`，
+  映射为短标签（政府/商业；普通蓝标不显示），写进 caption 与 fallback 文案的作者行。
 - **敏感内容标记**：两个后端都返回 `possibly_sensitive`（实测字段存在），解析进 `XTweetInfo.sensitive`；
   按 `x_sensitive_policy` 处理：`allow`（默认）照常、`text` 只回文字并追加提示、`skip` 整条不回复（仅日志）。
-  ⚠ 公开接口**没有敏感类型细分**（无 色情/暴力/仇恨 等类别，那些只在 X 内部审核与 Ads brand-safety 里）；
+  ⚠ X 的 UI 敏感分类（发帖 flag：**Nudity / Violence / Sensitive**，见 help.x.com/en/rules-and-policies/media-settings）
+  是**按媒体存在内部 GraphQL 数据**里的；我们用的公开接口（syndication / fxtwitter / API v2）只有推文级布尔
+  `possibly_sensitive`（API v2 数据字典亦仅此字段）。要读分类需另找通道（登录态 GraphQL / 页内嵌 Relay 数据），
+  待真实敏感推文样本验证后再决定是否实现；
   可读的其它标注：媒体 `ext_media_availability`（已用于跳过被限制媒体并给出准确原因）、
   媒体 `ext_alt_text`、用户 `verified_type`/`is_blue_verified`、fxtwitter `community_note`（社区笔记，非敏感类型）、
   推文 `withheld_in_countries`（地区屏蔽，出现时才有）。
@@ -127,12 +132,13 @@ x_sensitive_policy="allow"        # allow | text | skip
 - 仓库 `NekyuuYa/shinbot_plugin_linkparser` + 市场索引 `NekyuuYa/shinbot-plugins`；发版纪律：
   ruff+pytest → bump metadata/pyproject → 推送插件 → 索引 "Bump … to x.y.z"。
 - 依赖：bilibili-api-python、httpx、pydantic、**pillow**；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
-- 测试 194 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
+- 测试 198 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
   session_state、debounce、parsers/handler（分发/超时/断连/超限/长图/X 折叠与降级/纯文字）、bilibili client、
   download/compress（真实 ffmpeg）、xiaohongshu（扫描/HTML/stitch）、twitter（扫描/双通道解析/选档/后端降级/下载）、
   plugin_entry、packaging；XHS 选档/直链下载/ffmpeg `-f mp4` 回归；XHS 与 X 一致的
   caption+媒体折叠（含降级、caption 可关、视频/图文/混合三种 kind 与保序）；
-  `possibly_sensitive` 解析与三种策略（allow/text/skip）、媒体可用性（withheld）跳过与准确报错。
+  `possibly_sensitive` 解析与三种策略（allow/text/skip）、媒体可用性（withheld）跳过与准确报错、
+  账号标签映射与 caption 呈现。
   实测端到端：真实小红书视频笔记（720P 直链 18.5MB）下载成功，压缩到 5MB 用时 5s。
 
 ## 7. Roadmap
