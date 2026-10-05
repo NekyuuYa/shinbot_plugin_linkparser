@@ -98,6 +98,7 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `send_forward` | `true` | 「文字+媒体」折叠为一条聊天记录（合并转发，X 与小红书通用），失败自动降级 |
 | `x_image_mode` | `"raw"` | X 多图：`raw`=逐张（默认）；`long`=拼长图（可选） |
 | `x_video_max_height` | `720` | X 视频下载最大分辨率（避免拉 4K 原片） |
+| `x_sensitive_policy` | `"allow"` | X 推文 `possibly_sensitive`（敏感内容标记）的处理：`allow`=照常发送；`text`=只回文字提示、省略媒体；`skip`=整条不回复 |
 
 ## 开发
 

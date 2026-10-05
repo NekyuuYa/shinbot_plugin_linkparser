@@ -158,6 +158,7 @@ class XTweetInfo:
     author_name: str
     author_handle: str
     created_at: str = ""
+    sensitive: bool = False
     media: list[XMedia] = field(default_factory=list)
 
     @property

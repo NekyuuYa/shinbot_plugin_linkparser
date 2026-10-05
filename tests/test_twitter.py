@@ -333,3 +333,32 @@ def test_parse_syndication_mixed_media_keeps_order() -> None:
     assert [item.kind for item in info.media] == ["photo", "video", "photo"]
     assert len(info.photos) == 2
     assert len(info.videos) == 1
+
+
+# ── sensitive-content flag ────────────────────────────────────────────────
+
+
+def test_parse_syndication_reads_possibly_sensitive() -> None:
+    payload = _syndication_payload()
+    payload["possibly_sensitive"] = True
+    info = parse_syndication(payload, STATUS_ID)
+    assert info is not None and info.sensitive is True
+
+
+def test_parse_fxtwitter_reads_possibly_sensitive() -> None:
+    payload = {
+        "tweet": {
+            "url": f"https://x.com/NASA/status/{STATUS_ID}",
+            "text": "nsfw",
+            "possibly_sensitive": True,
+            "author": {"name": "NASA", "screen_name": "NASA"},
+            "media": {},
+        }
+    }
+    info = parse_fxtwitter(payload, STATUS_ID)
+    assert info is not None and info.sensitive is True
+
+
+def test_sensitive_defaults_false() -> None:
+    info = parse_syndication(_syndication_payload(), STATUS_ID)
+    assert info is not None and info.sensitive is False

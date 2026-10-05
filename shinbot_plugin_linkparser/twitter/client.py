@@ -161,6 +161,7 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         author_name=str(user.get("name") or ""),
         author_handle=str(user.get("screen_name") or ""),
         created_at=str(data.get("created_at") or ""),
+        sensitive=bool(data.get("possibly_sensitive")),
         media=media_items,
     )
 
@@ -210,6 +211,7 @@ def parse_fxtwitter(data: dict[str, Any], status_id: str) -> XTweetInfo | None:
         author_name=str(author.get("name") or ""),
         author_handle=str(author.get("screen_name") or ""),
         created_at=str(tweet.get("created_at") or ""),
+        sensitive=bool(tweet.get("possibly_sensitive")),
         media=media_items,
     )
 

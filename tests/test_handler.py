@@ -502,3 +502,64 @@ def test_x_mixed_media_fallback_sends_video_then_images(
     assert isinstance(ctx.sent[0], str)
     assert ctx.sent[1][0]["type"] == "video"
     assert ctx.sent[2][0]["type"] == "img"
+
+
+def _sensitive_x_outcome(kind: str, files: list, tmp_path):
+    outcome = _x_outcome(kind, files, tmp_path)
+    outcome.info.sensitive = True
+    return outcome
+
+
+def test_x_sensitive_policy_allow_sends_media(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "sens_video.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_x(*_a, **_k):
+        return _sensitive_x_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1  # folded record still contains the media
+    assert ctx.sent[0][0]["attrs"].get("forward") == "true"
+
+
+def test_x_sensitive_policy_text_omits_media(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    config.x_sensitive_policy = "text"
+    video = tmp_path / "sens_video2.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_x(*_a, **_k):
+        return _sensitive_x_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    text = str(ctx.sent[0])
+    assert "敏感" in text
+    assert "Good morning" in text  # caption kept
+    assert isinstance(ctx.sent[0], str)  # no media
+
+
+def test_x_sensitive_policy_skip_sends_nothing(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    config.x_sensitive_policy = "skip"
+    video = tmp_path / "sens_video3.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_x(*_a, **_k):
+        return _sensitive_x_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert ctx.sent == []
+    assert debouncer.hit("g:1", f"x:post:{X_STATUS}") is True

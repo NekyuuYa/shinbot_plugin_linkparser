@@ -179,6 +179,13 @@ class LinkParserPluginConfig(BaseModel):
         le=2160,
         description="X 视频下载的最大分辨率（避免直接拉 4K 原片）。",
     )
+    x_sensitive_policy: Literal["allow", "text", "skip"] = Field(
+        default="allow",
+        description=(
+            "X 推文被标记 possibly_sensitive（敏感内容）时的处理："
+            "allow=照常发送（默认）；text=只回文字并提示、省略媒体；skip=整条不回复（仅记日志）。"
+        ),
+    )
 
 
 __plugin_config_class__ = LinkParserPluginConfig
@@ -489,6 +496,18 @@ async def _handle_message(
             resolved_resource = f"x:post:{outcome.info.status_id}"
             if config.send_text:
                 caption = outcome.info.caption
+            if outcome.info.sensitive and config.x_sensitive_policy != "allow":
+                plg.logger.info(
+                    "LinkParser: X post %s flagged possibly_sensitive (policy=%s)",
+                    outcome.info.status_id,
+                    config.x_sensitive_policy,
+                )
+                if config.x_sensitive_policy == "skip":
+                    debouncer.remember(session_id, resolved_resource)
+                    return
+                note = "（该推文被标记为可能敏感的内容，已省略媒体）"
+                caption = f"{caption}\n{note}" if caption else note
+                media = []
         else:
             outcome = await parse_video(
                 client,
