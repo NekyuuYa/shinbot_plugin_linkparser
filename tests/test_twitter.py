@@ -144,9 +144,11 @@ def test_parse_syndication() -> None:
     assert info.author_name == "NASA"
     assert info.author_handle == "NASA"
     assert info.photos == ["https://pbs.twimg.com/media/a.jpg?name=large"]
-    assert info.video_duration == pytest.approx(32.405)
-    assert info.cover_url == "https://pbs.twimg.com/cover.jpg"
-    heights = [v["height"] for v in info.video_variants]
+    assert [item.kind for item in info.media] == ["photo", "video"]
+    video = info.videos[0]
+    assert video.duration == pytest.approx(32.405)
+    assert video.cover_url == "https://pbs.twimg.com/cover.jpg"
+    heights = [v["height"] for v in video.variants]
     assert 720 in heights and None in heights
 
 
@@ -184,9 +186,11 @@ def test_parse_fxtwitter() -> None:
         "https://pbs.twimg.com/media/x.jpg?name=large",
         "https://pbs.twimg.com/media/y.jpg?name=large",
     ]
-    assert info.video_duration == pytest.approx(12.5)
-    assert info.video_variants[0]["height"] == 720
-    assert info.cover_url == "https://pbs.twimg.com/thumb.jpg"
+    assert [item.kind for item in info.media] == ["photo", "photo", "video"]
+    video = info.videos[0]
+    assert video.duration == pytest.approx(12.5)
+    assert video.variants[0]["height"] == 720
+    assert video.cover_url == "https://pbs.twimg.com/thumb.jpg"
 
 
 def test_parse_fxtwitter_rejects_non_tweet() -> None:
@@ -271,7 +275,7 @@ def test_download_video_direct_mp4(tmp_path) -> None:
     dest = tmp_path / "v.mp4"
     try:
         ok, height = asyncio.run(
-            download_video(client.http, info, dest, max_height=720)
+            download_video(client.http, info.videos[0].variants, dest, max_height=720)
         )
     finally:
         asyncio.run(client.close())
@@ -284,9 +288,7 @@ def test_download_video_hls_requires_ffmpeg(tmp_path, monkeypatch) -> None:
     from shinbot_plugin_linkparser.twitter import media as xmedia
 
     monkeypatch.setattr(xmedia, "ffmpeg_available", lambda: False)
-    info = parse_syndication(_syndication_payload(), STATUS_ID)
-    assert info is not None
-    info.video_variants = [
+    hls_variants = [
         {
             "url": "https://v/pl/x.m3u8",
             "content_type": "application/x-mpegURL",
@@ -297,6 +299,37 @@ def test_download_video_hls_requires_ffmpeg(tmp_path, monkeypatch) -> None:
     client = _client_with(lambda request: httpx.Response(404))
     try:
         with pytest.raises(XError):
-            asyncio.run(download_video(client.http, info, tmp_path / "x.mp4"))
+            asyncio.run(
+                download_video(client.http, hls_variants, tmp_path / "x.mp4")
+            )
     finally:
         asyncio.run(client.close())
+
+
+def test_parse_syndication_mixed_media_keeps_order() -> None:
+    payload = {
+        "text": "mixed",
+        "user": {"name": "NASA", "screen_name": "NASA"},
+        "mediaDetails": [
+            {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/p1.jpg"},
+            {
+                "type": "video",
+                "media_url_https": "https://pbs.twimg.com/cover.jpg",
+                "video_info": {
+                    "variants": [
+                        {
+                            "content_type": "video/mp4",
+                            "bitrate": 832000,
+                            "url": "https://v/vid/avc1/640x360/a.mp4",
+                        }
+                    ]
+                },
+            },
+            {"type": "photo", "media_url_https": "https://pbs.twimg.com/media/p2.jpg"},
+        ],
+    }
+    info = parse_syndication(payload, STATUS_ID)
+    assert info is not None
+    assert [item.kind for item in info.media] == ["photo", "video", "photo"]
+    assert len(info.photos) == 2
+    assert len(info.videos) == 1

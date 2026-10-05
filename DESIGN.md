@@ -1,6 +1,6 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**v0.5.3**（181 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
+> 状态：**v0.5.4**（185 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
 > 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图；
 > X 的「文字+媒体」默认折叠为一条聊天记录（合并转发）。真实端到端验证：B站（HTML5/DASH/压缩/卡片）、
 > X（官方 syndication + fxtwitter 兜底、图片与 mp4 下载）、小红书（HTML 解析/图片/长图/HLS）。
@@ -20,7 +20,8 @@
   视频优先直链 mp4 下载（HLS 才走 ffmpeg）并按需压缩。
 - **X/Twitter**：`x.com`/`twitter.com`（含 `mobile.`、`/i/status`、`/i/web/status`、legacy `/statuses/`）、
   镜像站 `fxtwitter/vxtwitter/fixupx/fixvx/twittpr` 的 `/status/<id>` → 文字+媒体**折叠聊天记录**；
-  纯文字推文回文字；多图默认长图；视频选 ≤`x_video_max_height` 的 mp4 变体后按需压缩。
+  纯文字推文回文字；多图逐张（默认不拼图）；视频选 ≤`x_video_max_height` 的 mp4 变体后按需压缩；
+  **图片与视频混合 / 多视频按推文原顺序全部发送**（模型为保序 `XTweetInfo.media: list[XMedia]`）。
 - **三档**（会话级 `/parser`，全局 `default_mode` 兜底，默认 `off`）：
   - `off`：不解析。
   - `at`：仅当消息 @本机器人；解析对象 = 消息自身 +（@消息引用回复时）被引消息内容。
@@ -75,6 +76,9 @@ shinbot_plugin_linkparser/
 
 ## 4. 关键决策
 
+- **保序媒体列表**：`XTweetInfo.media` 按推文顺序保存每个附件（photo/video/gif）；`parse_x_post` 逐条下载并产出
+  `MediaItem` 列表（`kind` = video/images/mixed/text），不再"有视频就丢图"；多视频各自选档、各自压缩。
+  折叠记录里一条媒体一个 node；非折叠降级时先发视频消息再发图片消息。
 - **统一「文字+媒体」折叠**：小红书与 X 共用一条发送路径——caption 由各自 info 提供
   （`XTweetInfo.caption` / `XHSNoteInfo.caption`），`send_text`/`send_forward` 开关与折叠/降级逻辑平台无关；
   仅 B站保持"只回视频"（无 caption）。命名从 `x_send_text`/`x_send_forward` 去平台化为 `send_text`/`send_forward`。
@@ -116,11 +120,11 @@ x_image_mode="raw"; x_video_max_height=720
 - 仓库 `NekyuuYa/shinbot_plugin_linkparser` + 市场索引 `NekyuuYa/shinbot-plugins`；发版纪律：
   ruff+pytest → bump metadata/pyproject → 推送插件 → 索引 "Bump … to x.y.z"。
 - 依赖：bilibili-api-python、httpx、pydantic、**pillow**；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
-- 测试 181 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
+- 测试 185 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
   session_state、debounce、parsers/handler（分发/超时/断连/超限/长图/X 折叠与降级/纯文字）、bilibili client、
   download/compress（真实 ffmpeg）、xiaohongshu（扫描/HTML/stitch）、twitter（扫描/双通道解析/选档/后端降级/下载）、
   plugin_entry、packaging；XHS 选档/直链下载/ffmpeg `-f mp4` 回归；XHS 与 X 一致的
-  caption+媒体折叠（含降级、caption 可关、视频/图文两种 kind）。
+  caption+媒体折叠（含降级、caption 可关、视频/图文/混合三种 kind 与保序）。
   实测端到端：真实小红书视频笔记（720P 直链 18.5MB）下载成功，压缩到 5MB 用时 5s。
 
 ## 7. Roadmap

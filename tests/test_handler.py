@@ -177,7 +177,7 @@ def _xhs_outcome(kind: str, files: list, tmp_path):
         image_urls=[],
         page_url="https://www.xiaohongshu.com/explore/n1",
     )
-    return XHSOutcome(kind=kind, files=files, info=info)
+    return XHSOutcome(kind=kind, media=_media_items(kind, files), info=info)
 
 
 def _xhs_context():
@@ -285,6 +285,18 @@ X_STATUS = "2040059740848283920"
 X_LINK = f"https://x.com/NASA/status/{X_STATUS}"
 
 
+def _media_items(kind: str, files: list) -> list:
+    from shinbot_plugin_linkparser.models import MediaItem
+
+    if kind == "video":
+        return [MediaItem("video", files[0])]
+    if kind == "mixed":
+        return [MediaItem("video", files[0])] + [
+            MediaItem("image", path) for path in files[1:]
+        ]
+    return [MediaItem("image", path) for path in files]
+
+
 def _x_outcome(kind: str, files: list, tmp_path):
     from shinbot_plugin_linkparser.models import XOutcome, XTweetInfo
 
@@ -295,7 +307,7 @@ def _x_outcome(kind: str, files: list, tmp_path):
         author_name="NASA",
         author_handle="NASA",
     )
-    return XOutcome(kind=kind, files=files, info=info)
+    return XOutcome(kind=kind, media=_media_items(kind, files), info=info)
 
 
 def _x_context(elements: list | None = None):
@@ -439,3 +451,54 @@ def test_multi_image_folded_as_separate_nodes(handler_env, monkeypatch, tmp_path
     assert len(image_nodes) == 3
     for node in image_nodes:
         assert len([c for c in node["children"] if c.get("type") == "img"]) == 1
+
+
+def test_x_mixed_media_folded_keeps_order(handler_env, monkeypatch, tmp_path) -> None:
+    """A post with both a video and photos sends both, in tweet order."""
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "mix_video.mp4"
+    video.write_bytes(b"video")
+    photo_a = tmp_path / "mix_a.jpg"
+    photo_a.write_bytes(b"a")
+    photo_b = tmp_path / "mix_b.jpg"
+    photo_b.write_bytes(b"b")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("mixed", [video, photo_a, photo_b], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    nodes = ctx.sent[0][0]["children"]
+    assert "Good morning" in str(nodes[0])  # caption first
+    kinds = [
+        node["children"][0]["type"]
+        for node in nodes[1:]
+        if node.get("children")
+    ]
+    assert kinds == ["video", "img", "img"]
+
+
+def test_x_mixed_media_fallback_sends_video_then_images(
+    handler_env, monkeypatch, tmp_path
+) -> None:
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "mix2_video.mp4"
+    video.write_bytes(b"video")
+    photo = tmp_path / "mix2_a.jpg"
+    photo.write_bytes(b"a")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("mixed", [video, photo], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()  # forward unsupported → caption + video + images
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 3
+    assert isinstance(ctx.sent[0], str)
+    assert ctx.sent[1][0]["type"] == "video"
+    assert ctx.sent[2][0]["type"] == "img"

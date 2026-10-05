@@ -102,13 +102,50 @@ class XHSNoteInfo:
         return "\n".join(parts)
 
 
+@dataclass(slots=True, frozen=True)
+class MediaItem:
+    """One locally produced media file of an outcome."""
+
+    kind: str  # "video" | "image"
+    path: object  # pathlib.Path
+
+
 @dataclass(slots=True)
 class XHSOutcome:
-    """Result of parsing a Xiaohongshu note into local files."""
+    """Result of parsing a Xiaohongshu note into local media."""
 
     kind: str  # "video" | "images"
-    files: list[object]  # list[pathlib.Path]
+    media: list[MediaItem]
     info: XHSNoteInfo
+
+    @property
+    def files(self) -> list[object]:
+        """Return the produced paths (compatibility helper)."""
+        return [item.path for item in self.media]
+
+
+@dataclass(slots=True)
+class XMedia:
+    """One media attachment of a post, preserving tweet order.
+
+    Attributes:
+        kind: ``"photo"``, ``"video"`` or ``"gif"``.
+        url: Photo URL (large size) for photos.
+        variants: Normalized video variants for video/gif items.
+        duration: Video duration in seconds, when known.
+        cover_url: Poster/thumbnail URL for video/gif items.
+    """
+
+    kind: str
+    url: str = ""
+    variants: list[dict] = field(default_factory=list)
+    duration: float | None = None
+    cover_url: str | None = None
+
+    @property
+    def is_video(self) -> bool:
+        """Return True for video and animated-gif attachments."""
+        return self.kind in ("video", "gif")
 
 
 @dataclass(slots=True)
@@ -121,10 +158,17 @@ class XTweetInfo:
     author_name: str
     author_handle: str
     created_at: str = ""
-    photos: list[str] = field(default_factory=list)
-    video_variants: list[dict] = field(default_factory=list)
-    video_duration: float | None = None
-    cover_url: str | None = None
+    media: list[XMedia] = field(default_factory=list)
+
+    @property
+    def photos(self) -> list[str]:
+        """Return the photo URLs (compatibility helper)."""
+        return [item.url for item in self.media if item.kind == "photo" and item.url]
+
+    @property
+    def videos(self) -> list[XMedia]:
+        """Return the video/gif attachments."""
+        return [item for item in self.media if item.is_video]
 
     @property
     def display_title(self) -> str:
@@ -142,11 +186,20 @@ class XTweetInfo:
 
 @dataclass(slots=True)
 class XOutcome:
-    """Result of parsing an X/Twitter post."""
+    """Result of parsing an X/Twitter post.
 
-    kind: str  # "video" | "images" | "text"
-    files: list[object]  # list[pathlib.Path]
+    ``kind`` is ``"video"``, ``"images"``, ``"mixed"`` (both video and photos)
+    or ``"text"`` (no media).
+    """
+
+    kind: str
+    media: list[MediaItem]
     info: XTweetInfo
+
+    @property
+    def files(self) -> list[object]:
+        """Return the produced paths (compatibility helper)."""
+        return [item.path for item in self.media]
 
 
 @dataclass(slots=True)

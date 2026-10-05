@@ -358,14 +358,14 @@ def _supports_forward(message_context: Any) -> bool:
 async def _send_folded(
     message_context: Any,
     caption: str,
-    files: list[Path],
-    is_video: bool,
+    media: list[Any],
     logger: Any,
 ) -> bool:
     """Send caption + media as one collapsed chat-record (forward) message.
 
-    Returns False when the adapter rejects the folded send so the caller can
-    fall back to separate text/media messages.
+    Emits one chat-record entry per media item (video or image), keeping the
+    order of the original post. Returns False when the adapter rejects the
+    folded send so the caller can fall back to separate messages.
     """
     try:
         from shinbot.schema.elements import MessageElement
@@ -377,22 +377,13 @@ async def _send_folded(
                     [MessageElement.text(caption)], nickname=_FORWARD_NAME
                 )
             )
-        if is_video:
-            for path in files:
-                nodes.append(
-                    MessageElement.message(
-                        [MessageElement.video(str(path))], nickname=_FORWARD_NAME
-                    )
-                )
-        else:
-            # One chat-record entry per image keeps the album readable and the
-            # per-message payload small (no stitching by default).
-            for path in files:
-                nodes.append(
-                    MessageElement.message(
-                        [MessageElement.img(str(path))], nickname=_FORWARD_NAME
-                    )
-                )
+        for item in media:
+            element = (
+                MessageElement.video(str(item.path))
+                if item.kind == "video"
+                else MessageElement.img(str(item.path))
+            )
+            nodes.append(MessageElement.message([element], nickname=_FORWARD_NAME))
         if not nodes:
             return False
         await message_context.send([MessageElement.forward(nodes)])
@@ -420,6 +411,7 @@ async def _handle_message(
     from shinbot.schema.elements import MessageElement
 
     from .bilibili import BilibiliError, ffmpeg_available
+    from .models import MediaItem
     from .parse_policy import make_db_quote_resolver, parse_candidates_for, visible_mentions_bot
     from .parsers import delete_cached_file, parse_video, parse_x_post, parse_xhs_note
     from .twitter import XError
@@ -451,8 +443,7 @@ async def _handle_message(
         return
     debouncer.remember(session_id, link_key)
 
-    is_video = True
-    files: list[Path] = []
+    media: list[MediaItem] = []
     title = "视频"
     page_url = ""
     caption: str | None = None
@@ -473,8 +464,7 @@ async def _handle_message(
                 compress=config.compress,
                 compress_max_height=config.compress_max_height,
             )
-            files = [Path(path) for path in outcome.files]
-            is_video = outcome.kind == "video"
+            media = list(outcome.media)
             title = outcome.info.display_title or "小红书笔记"
             page_url = outcome.info.page_url
             resolved_resource = f"xiaohongshu:post:{outcome.info.note_id}"
@@ -493,8 +483,7 @@ async def _handle_message(
                 compress=config.compress,
                 compress_max_height=config.compress_max_height,
             )
-            files = [Path(path) for path in outcome.files]
-            is_video = outcome.kind == "video"
+            media = list(outcome.media)
             title = outcome.info.display_title or "X 推文"
             page_url = outcome.info.url
             resolved_resource = f"x:post:{outcome.info.status_id}"
@@ -514,7 +503,7 @@ async def _handle_message(
                 compress=config.compress,
                 compress_max_height=config.compress_max_height,
             )
-            files = [outcome.path]
+            media = [MediaItem(kind="video", path=outcome.path)]
             title = outcome.meta.display_title or "视频"
             page_url = outcome.meta.page_url
             resolved_resource = (
@@ -534,7 +523,7 @@ async def _handle_message(
         return
 
     # ── reply ─────────────────────────────────────────────────────────
-    if not files:
+    if not media:
         # Text-only post (e.g. a text tweet): reply with the caption.
         if caption:
             await _safe_send(message_context, caption, plg.logger, "text-post")
@@ -542,17 +531,22 @@ async def _handle_message(
             debouncer.remember(session_id, resolved_resource)
         return
 
-    if is_video:
-        size_mb = _file_size_mb(files[0])
-        if config.max_send_mb > 0 and size_mb > config.max_send_mb:
+    video_paths = [Path(item.path) for item in media if item.kind == "video"]
+    if config.max_send_mb > 0:
+        oversize = next(
+            (path for path in video_paths if _file_size_mb(path) > config.max_send_mb),
+            None,
+        )
+        if oversize is not None:
             # Still over the send cap after (attempted) compression — reply
             # with a link. Usually ffmpeg is missing or compression disabled.
+            size_mb = _file_size_mb(oversize)
             hint = ""
             if config.compress and not ffmpeg_available():
                 hint = "\n（安装 ffmpeg 后本插件可自动压缩后直发）"
             plg.logger.info(
                 "LinkParser video %s is %dMB > max_send_mb=%d; text fallback",
-                files[0].name,
+                oversize.name,
                 size_mb,
                 config.max_send_mb,
             )
@@ -566,23 +560,22 @@ async def _handle_message(
             return
 
     # Preferred: collapse caption + media into one chat record (OneBot
-    # forward) so neither the text nor the media is lost.
+    # forward, one entry per media item) so neither text nor media is lost.
     sent = False
     if caption and config.send_forward and _supports_forward(message_context):
-        sent = await _send_folded(
-            message_context, caption, files, is_video, plg.logger
-        )
+        sent = await _send_folded(message_context, caption, media, plg.logger)
     if not sent:
         if caption:
             await _safe_send(message_context, caption, plg.logger, "post-caption")
-        elements_payload = []
-        for path in files:
-            if is_video:
-                elements_payload.append(MessageElement.video(str(path)))
-            else:
-                elements_payload.append(MessageElement.img(str(path)))
+        groups: list[list[Any]] = []
+        if video_paths:
+            groups.append([MessageElement.video(str(path)) for path in video_paths])
+        image_paths = [Path(item.path) for item in media if item.kind == "image"]
+        if image_paths:
+            groups.append([MessageElement.img(str(path)) for path in image_paths])
         try:
-            await message_context.send(elements_payload)
+            for group in groups:
+                await message_context.send(group)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -607,9 +600,9 @@ async def _handle_message(
     # Send succeeded; remember the canonical resource for dedupe (unless the
     # files were deleted right after sending).
     if config.delete_after_send:
-        for path in files:
-            if delete_cached_file(path):
-                plg.logger.debug("LinkParser removed sent cache: %s", path)
+        for item in media:
+            if delete_cached_file(Path(item.path)):
+                plg.logger.debug("LinkParser removed sent cache: %s", item.path)
         if resolved_resource:
             debouncer.forget(session_id, resolved_resource)
     elif resolved_resource:

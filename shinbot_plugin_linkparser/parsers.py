@@ -18,7 +18,14 @@ from .bilibili import (
     download_plan_to_file,
     ffmpeg_available,
 )
-from .models import LinkCandidate, ParseOutcome, VideoMeta, XHSOutcome, XOutcome
+from .models import (
+    LinkCandidate,
+    MediaItem,
+    ParseOutcome,
+    VideoMeta,
+    XHSOutcome,
+    XOutcome,
+)
 from .urls import find_bilibili_candidates
 
 logger = logging.getLogger("shinbot_plugin_linkparser.parsers")
@@ -332,7 +339,7 @@ async def parse_xhs_note(
                     duration_seconds=int(duration),
                     max_height=compress_max_height,
                 )
-        return XHSOutcome(kind="video", files=[dest], info=info)
+        return XHSOutcome(kind="video", media=[MediaItem("video", dest)], info=info)
 
     if not info.image_urls:
         raise XHSError("该小红书笔记没有可下载的图片/视频内容。")
@@ -359,9 +366,13 @@ async def parse_xhs_note(
             max_height=stitch_max_height,
         )
         if out is not None:
-            return XHSOutcome(kind="images", files=[out], info=info)
+            return XHSOutcome(kind="images", media=[MediaItem("image", out)], info=info)
         logger.info("xhs stitch unavailable; sending raw images")
-    return XHSOutcome(kind="images", files=image_paths, info=info)
+    return XHSOutcome(
+        kind="images",
+        media=[MediaItem("image", path) for path in image_paths],
+        info=info,
+    )
 
 
 async def parse_x_post(
@@ -379,10 +390,12 @@ async def parse_x_post(
 ) -> XOutcome:
     """Resolve and download an X/Twitter post (video, photos or text-only).
 
-    Video posts download the best progressive mp4 variant no taller than
-    *video_max_height* (HLS falls back to ffmpeg) and are compressed toward
-    *max_send_mb*; photo posts are downloaded and, when *image_mode* is
-    ``long``, stitched into one long image; text-only posts return no files.
+    Media attachments are processed in tweet order: each video downloads the
+    best progressive mp4 variant no taller than *video_max_height* (HLS falls
+    back to ffmpeg) and is compressed toward *max_send_mb*; photos are
+    downloaded individually (or stitched when *image_mode* is ``long``).
+    Posts mixing photos and videos keep both (``kind="mixed"``); text-only
+    posts return no media.
 
     Args:
         x_client: Initialised X/Twitter client.
@@ -405,7 +418,7 @@ async def parse_x_post(
     """
     from .bilibili import compress_to_target, probe_duration_seconds
     from .imagestitch import stitch_to_long_image
-    from .twitter import XError, download_photo, download_video
+    from .twitter import XError, download_photo, download_video, pick_video_variant
 
     status_id = candidate.status_id
     if not status_id:
@@ -415,51 +428,72 @@ async def parse_x_post(
     base_dir = Path(data_dir) / "x"
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    if info.video_variants:
-        dest = base_dir / f"{status_id}_video.mp4"
-        if not _reusable_video(dest):
-            max_bytes = max_size_mb * 1024 * 1024
-            downloaded, _height = await download_video(
-                x_client.http,
-                info,
-                dest,
-                max_height=video_max_height,
-                max_bytes=max_bytes,
-            )
-            if not downloaded:
-                raise XError("X 视频下载失败（可能受保护或链接已失效）。")
-        if max_send_mb > 0 and compress and _file_size_mb(dest) > max_send_mb:
-            duration = info.video_duration or await probe_duration_seconds(dest)
-            if duration and duration > 0:
-                await compress_to_target(
+    media: list[MediaItem] = []
+    media_failed = False
+    for position, item in enumerate(info.media, start=1):
+        if item.is_video:
+            variants = list(item.variants)
+            if pick_video_variant(variants, max_height=video_max_height) is None:
+                continue
+            dest = base_dir / f"{status_id}_video{position}.mp4"
+            if not _reusable_video(dest):
+                downloaded, _height = await download_video(
+                    x_client.http,
+                    variants,
                     dest,
-                    dest,
-                    target_bytes=max_send_mb * 1024 * 1024,
-                    duration_seconds=int(duration),
-                    max_height=compress_max_height,
+                    max_height=video_max_height,
+                    max_bytes=max_size_mb * 1024 * 1024,
                 )
-        return XOutcome(kind="video", files=[dest], info=info)
+                if not downloaded:
+                    media_failed = True
+                    continue
+            if max_send_mb > 0 and compress and _file_size_mb(dest) > max_send_mb:
+                duration = item.duration or await probe_duration_seconds(dest)
+                if duration and duration > 0:
+                    await compress_to_target(
+                        dest,
+                        dest,
+                        target_bytes=max_send_mb * 1024 * 1024,
+                        duration_seconds=int(duration),
+                        max_height=compress_max_height,
+                    )
+            media.append(MediaItem("video", dest))
+            continue
+        # photo attachment
+        if not item.url:
+            continue
+        dest = base_dir / f"{status_id}_{position}.jpg"
+        if dest.is_file() and dest.stat().st_size > 0:
+            media.append(MediaItem("image", dest))
+            continue
+        try:
+            await download_photo(x_client.http, item.url, dest)
+            media.append(MediaItem("image", dest))
+        except XError as exc:
+            logger.warning("x photo %d download failed: %s", position, exc)
+            media_failed = True
+            continue
 
-    if info.photos:
-        paths: list[Path] = []
-        for index, url in enumerate(info.photos, start=1):
-            dest = base_dir / f"{status_id}_{index}.jpg"
-            if dest.is_file() and dest.stat().st_size > 0:
-                paths.append(dest)
-                continue
-            try:
-                await download_photo(x_client.http, url, dest)
-                paths.append(dest)
-            except XError as exc:
-                logger.warning("x photo %d download failed: %s", index, exc)
-                continue
-        if not paths:
-            raise XError("X 推文图片下载失败（可能受保护或链接已失效）。")
-        if image_mode == "long" and len(paths) > 1:
-            stitched = base_dir / f"{status_id}_long.jpg"
-            out = stitch_to_long_image(paths, stitched, max_height=stitch_max_height)
-            if out is not None:
-                return XOutcome(kind="images", files=[out], info=info)
-        return XOutcome(kind="images", files=paths, info=info)
+    if not media:
+        if info.media or media_failed:
+            raise XError("X 推文媒体下载失败（可能受保护或链接已失效）。")
+        return XOutcome(kind="text", media=[], info=info)
 
-    return XOutcome(kind="text", files=[], info=info)
+    if (
+        image_mode == "long"
+        and len(media) > 1
+        and all(entry.kind == "image" for entry in media)
+    ):
+        stitched = base_dir / f"{status_id}_long.jpg"
+        stitched_path = stitch_to_long_image(
+            [Path(entry.path) for entry in media],
+            stitched,
+            max_height=stitch_max_height,
+        )
+        if stitched_path is not None:
+            media = [MediaItem("image", stitched_path)]
+
+    has_video = any(entry.kind == "video" for entry in media)
+    has_image = any(entry.kind == "image" for entry in media)
+    kind = "mixed" if has_video and has_image else ("video" if has_video else "images")
+    return XOutcome(kind=kind, media=media, info=info)

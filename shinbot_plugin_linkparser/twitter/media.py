@@ -8,7 +8,6 @@ from pathlib import Path
 import httpx
 
 from ..ffmpeg_media import download_hls_with_ffmpeg, ffmpeg_available
-from ..models import XTweetInfo
 from .client import REFERER, USER_AGENT, XError, pick_video_variant
 
 logger = logging.getLogger("shinbot_plugin_linkparser.x.media")
@@ -84,20 +83,20 @@ async def download_photo(
 
 async def download_video(
     http: httpx.AsyncClient,
-    info: XTweetInfo,
+    variants: list[dict],
     dest: Path,
     *,
     max_height: int = 720,
     max_bytes: int = 0,
 ) -> tuple[bool, int | None]:
-    """Download the selected video variant for a post.
+    """Download the selected video variant.
 
     Progressive ``video/mp4`` variants are streamed directly; HLS-only posts
     are downloaded through ffmpeg.
 
     Args:
         http: Shared HTTP client.
-        info: Parsed tweet info carrying ``video_variants``.
+        variants: Normalized variants of one video attachment.
         dest: Output mp4 path.
         max_height: Preferred maximum resolution.
         max_bytes: Optional size cap (0 disables).
@@ -108,7 +107,7 @@ async def download_video(
     Raises:
         XError: When the post has no playable variant or ffmpeg is missing.
     """
-    variant = pick_video_variant(info.video_variants, max_height=max_height)
+    variant = pick_video_variant(variants, max_height=max_height)
     if variant is None:
         raise XError("该推文没有可下载的视频流。")
     url = str(variant.get("url") or "")

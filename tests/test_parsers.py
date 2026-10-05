@@ -318,3 +318,71 @@ def test_compression_can_be_disabled(tmp_path, monkeypatch) -> None:
         )
     )
     assert outcome.path.stat().st_size > 1024 * 1024
+
+
+def test_parse_x_post_mixed_media_keeps_order(tmp_path, monkeypatch) -> None:
+    """A post with photos and a video keeps every attachment in tweet order."""
+    from pathlib import Path
+
+    from shinbot_plugin_linkparser import twitter as twitter_mod
+    from shinbot_plugin_linkparser.models import XMedia, XTweetInfo
+
+    info = XTweetInfo(
+        status_id="2040059740848283920",
+        url="https://x.com/i/status/2040059740848283920",
+        text="mixed",
+        author_name="NASA",
+        author_handle="NASA",
+        media=[
+            XMedia(kind="photo", url="https://pbs.twimg.com/a.jpg?name=large"),
+            XMedia(
+                kind="video",
+                variants=[
+                    {
+                        "url": "https://v/vid/avc1/640x360/a.mp4",
+                        "content_type": "video/mp4",
+                        "bitrate": 832000,
+                        "height": 360,
+                    }
+                ],
+                duration=5.0,
+            ),
+            XMedia(kind="photo", url="https://pbs.twimg.com/b.jpg?name=large"),
+        ],
+    )
+
+    class FakeXClient:
+        http = object()
+
+        async def fetch_tweet(self, status_id: str) -> XTweetInfo:
+            return info
+
+    async def fake_download_photo(http, url, dest, **_kwargs):
+        Path(dest).write_bytes(b"jpg")
+
+    async def fake_download_video(http, variants, dest, **_kwargs):
+        Path(dest).write_bytes(b"mp4")
+        return True, 360
+
+    monkeypatch.setattr(twitter_mod, "download_photo", fake_download_photo)
+    monkeypatch.setattr(twitter_mod, "download_video", fake_download_video)
+
+    candidate = LinkCandidate(
+        platform="x",
+        kind="post",
+        matched="https://x.com/NASA/status/2040059740848283920",
+        status_id="2040059740848283920",
+    )
+    outcome = asyncio.run(
+        parsers.parse_x_post(
+            FakeXClient(),
+            candidate,
+            data_dir=tmp_path,
+            image_mode="raw",
+            max_send_mb=0,
+        )
+    )
+    assert outcome.kind == "mixed"
+    assert [item.kind for item in outcome.media] == ["image", "video", "image"]
+    for item in outcome.media:
+        assert Path(item.path).exists()

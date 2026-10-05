@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from ..models import XTweetInfo
+from ..models import XMedia, XTweetInfo
 
 logger = logging.getLogger("shinbot_plugin_linkparser.x")
 
@@ -128,10 +128,7 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         if not isinstance(data, dict):
             return None
     user = data.get("user") or {}
-    photos: list[str] = []
-    variants: list[dict] = []
-    cover: str | None = None
-    duration: float | None = None
+    media_items: list[XMedia] = []
     for media in data.get("mediaDetails") or []:
         if not isinstance(media, dict):
             continue
@@ -139,16 +136,24 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         if media_type == "photo":
             url = _photo_url(str(media.get("media_url_https") or ""))
             if url:
-                photos.append(url)
+                media_items.append(XMedia(kind="photo", url=url))
             continue
         if media_type in ("video", "animated_gif"):
-            if cover is None:
-                cover = str(media.get("media_url_https") or "") or None
             info = media.get("video_info") or {}
-            variants.extend(_normalize_variants(info.get("variants") or []))
             millis = info.get("duration_millis")
-            if isinstance(millis, (int, float)) and millis > 0:
-                duration = float(millis) / 1000.0
+            duration = (
+                float(millis) / 1000.0
+                if isinstance(millis, (int, float)) and millis > 0
+                else None
+            )
+            media_items.append(
+                XMedia(
+                    kind="gif" if media_type == "animated_gif" else "video",
+                    variants=_normalize_variants(info.get("variants") or []),
+                    duration=duration,
+                    cover_url=str(media.get("media_url_https") or "") or None,
+                )
+            )
     return XTweetInfo(
         status_id=status_id,
         url=_STATUS_URL.format(status_id=status_id),
@@ -156,10 +161,7 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         author_name=str(user.get("name") or ""),
         author_handle=str(user.get("screen_name") or ""),
         created_at=str(data.get("created_at") or ""),
-        photos=photos,
-        video_variants=variants,
-        video_duration=duration,
-        cover_url=cover,
+        media=media_items,
     )
 
 
@@ -170,32 +172,37 @@ def parse_fxtwitter(data: dict[str, Any], status_id: str) -> XTweetInfo | None:
         return None
     author = tweet.get("author") or {}
     media = tweet.get("media") or {}
-    photos = [
-        _photo_url(str(photo.get("url") or ""))
+    media_items: list[XMedia] = [
+        XMedia(kind="photo", url=_photo_url(str(photo.get("url") or "")))
         for photo in (media.get("photos") or [])
         if isinstance(photo, dict) and photo.get("url")
     ]
-    variants: list[dict] = []
-    duration: float | None = None
-    cover: str | None = None
     for video in media.get("videos") or []:
         if not isinstance(video, dict) or not video.get("url"):
             continue
         height = video.get("height")
         if height is None:
             height = _height_from_url(str(video.get("url") or ""))
-        variants.append(
-            {
-                "url": str(video["url"]),
-                "content_type": _MP4,
-                "bitrate": None,
-                "height": height,
-            }
+        duration = (
+            float(video["duration"])
+            if isinstance(video.get("duration"), (int, float))
+            else None
         )
-        if duration is None and isinstance(video.get("duration"), (int, float)):
-            duration = float(video["duration"])
-        if cover is None:
-            cover = str(video.get("thumbnail_url") or "") or None
+        media_items.append(
+            XMedia(
+                kind="video",
+                variants=[
+                    {
+                        "url": str(video["url"]),
+                        "content_type": _MP4,
+                        "bitrate": None,
+                        "height": height,
+                    }
+                ],
+                duration=duration,
+                cover_url=str(video.get("thumbnail_url") or "") or None,
+            )
+        )
     return XTweetInfo(
         status_id=status_id,
         url=str(tweet.get("url") or _STATUS_URL.format(status_id=status_id)),
@@ -203,10 +210,7 @@ def parse_fxtwitter(data: dict[str, Any], status_id: str) -> XTweetInfo | None:
         author_name=str(author.get("name") or ""),
         author_handle=str(author.get("screen_name") or ""),
         created_at=str(tweet.get("created_at") or ""),
-        photos=photos,
-        video_variants=variants,
-        video_duration=duration,
-        cover_url=cover,
+        media=media_items,
     )
 
 
