@@ -389,6 +389,8 @@ def _candidate_key(candidate: LinkCandidate) -> tuple[str, str, str, int]:
         identifier = f"av{candidate.avid}"
     if not identifier and candidate.platform == "xiaohongshu":
         identifier = candidate.note_id or f"xhslink:{candidate.short_code}"
+    if not identifier and candidate.platform == "x":
+        identifier = candidate.status_id
     if not identifier and candidate.short_code:
         identifier = f"redirect:{candidate.short_code}"
     return (candidate.platform, candidate.kind, identifier or candidate.matched, candidate.page)
@@ -571,9 +573,54 @@ def find_xhs_candidates(text: str) -> list[LinkCandidate]:
     return list(candidates.values())
 
 
+_X_STATUS_RE = re.compile(
+    r"(?<![0-9A-Za-z.])"
+    r"(?:https?://)?"
+    r"(?:www\.|mobile\.)?"
+    r"(?:x\.com|twitter\.com|fxtwitter\.com|vxtwitter\.com|fixupx\.com|fixvx\.com|twittpr\.com)"
+    r"/(?:[A-Za-z0-9_]{1,20}/)?"
+    r"(?:i/)?"
+    r"(?:web/)?"
+    r"(?:status|statuses)/"
+    r"(?P<id>\d{1,25})",
+    re.IGNORECASE,
+)
+
+
+def find_x_candidates(text: str) -> list[LinkCandidate]:
+    """Scan *text* for X/Twitter post (status) links.
+
+    Covers ``x.com`` / ``twitter.com`` (incl. ``mobile.`` and ``/i/status/``),
+    ``/statuses/`` legacy paths and the common third-party mirror hosts
+    (``fxtwitter``/``vxtwitter``/``fixupx``/``fixvx``/``twittpr``) that simply
+    wrap the same status id.
+
+    Args:
+        text: The message text to scan.
+
+    Returns:
+        Deduplicated X candidates.
+    """
+    if not text:
+        return []
+    candidates: dict[tuple[str, str, str, int], LinkCandidate] = {}
+    for match in _X_STATUS_RE.finditer(text):
+        token = text[match.start() : _token_end(text, match.start())]
+        status_id = match.group("id")
+        candidate = LinkCandidate(
+            platform="x",
+            kind="post",
+            matched=token,
+            status_id=status_id,
+        )
+        candidates.setdefault(_candidate_key(candidate), candidate)
+    return list(candidates.values())
+
+
 def find_supported_candidates(text: str) -> list[LinkCandidate]:
-    """Scan *text* for any supported platform (bilibili + xiaohongshu)."""
+    """Scan *text* for any supported platform (bilibili + xiaohongshu + x)."""
     return merge_candidates(
         find_bilibili_candidates(text),
         find_xhs_candidates(text),
+        find_x_candidates(text),
     )

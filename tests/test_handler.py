@@ -104,10 +104,17 @@ def handler_env(tmp_path, monkeypatch):
     return plg, config, state, debouncer, client
 
 
-def _run(plg, config, state, debouncer, client, ctx, xhs_client=None) -> None:
+def _run(plg, config, state, debouncer, client, ctx, xhs_client=None, x_client=None) -> None:
     asyncio.run(
         plugin._handle_message(
-            plg, config, state, client, xhs_client or object(), debouncer, ctx
+            plg,
+            config,
+            state,
+            client,
+            xhs_client or object(),
+            x_client or object(),
+            debouncer,
+            ctx,
         )
     )
 
@@ -201,3 +208,133 @@ def test_xhs_image_note_sends_images(handler_env, monkeypatch, tmp_path) -> None
     assert payload[0]["type"] == "img"
     resource = "xiaohongshu:post:n1"
     assert debouncer.hit("g:1", resource) is True
+
+
+X_STATUS = "2040059740848283920"
+X_LINK = f"https://x.com/NASA/status/{X_STATUS}"
+
+
+def _x_outcome(kind: str, files: list, tmp_path):
+    from shinbot_plugin_linkparser.models import XOutcome, XTweetInfo
+
+    info = XTweetInfo(
+        status_id=X_STATUS,
+        url=f"https://x.com/i/status/{X_STATUS}",
+        text="Good morning, world!",
+        author_name="NASA",
+        author_handle="NASA",
+    )
+    return XOutcome(kind=kind, files=files, info=info)
+
+
+def _x_context(elements: list | None = None):
+    ctx = MessageContext()
+    ctx.message = SimpleNamespace(
+        elements=elements
+        or [{"type": "text", "attrs": {"content": X_LINK}, "children": []}]
+    )
+    return ctx
+
+
+def test_x_media_folded_into_chat_record(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    image = tmp_path / "x1.jpg"
+    image.write_bytes(b"img")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("images", [image], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    payload = ctx.sent[0]
+    assert isinstance(payload, list)
+    root = payload[0]
+    assert root["type"] == "message" and root["attrs"].get("forward") == "true"
+    nodes = root["children"]
+    assert nodes and nodes[0]["type"] == "message"
+    # caption node carries the tweet text; media node carries the image
+    assert any("Good morning" in str(node) for node in nodes)
+    assert any(
+        child.get("type") == "img" for node in nodes for child in node.get("children", [])
+    )
+    assert debouncer.hit("g:1", f"x:post:{X_STATUS}") is True
+
+
+def test_x_media_falls_back_when_forward_unsupported(
+    handler_env, monkeypatch, tmp_path
+) -> None:
+    plg, config, state, debouncer, client = handler_env
+    image = tmp_path / "x2.jpg"
+    image.write_bytes(b"img")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("images", [image], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()  # no adapter attribute → forward unsupported
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 2
+    assert isinstance(ctx.sent[0], str) and "Good morning" in ctx.sent[0]
+    assert isinstance(ctx.sent[1], list) and ctx.sent[1][0]["type"] == "img"
+
+
+def test_x_text_only_post_sends_caption(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("text", [], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    assert isinstance(ctx.sent[0], str)
+    assert "NASA" in ctx.sent[0] and "Good morning" in ctx.sent[0]
+    assert debouncer.hit("g:1", f"x:post:{X_STATUS}") is True
+
+
+def test_x_video_sent_as_video_element(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "x_video.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    _run(plg, config, state, debouncer, client, ctx)
+
+    # forward unsupported here → caption text first, then the video element
+    assert len(ctx.sent) == 2
+    assert isinstance(ctx.sent[0], str)
+    assert ctx.sent[1][0]["type"] == "video"
+
+
+def test_x_video_folded_with_forward_adapter(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "x_video2.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_x(*_a, **_k):
+        return _x_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_x_post", fake_parse_x)
+    ctx = _x_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    root = ctx.sent[0][0]
+    assert root["attrs"].get("forward") == "true"
+    assert any(
+        child.get("type") == "video"
+        for node in root["children"]
+        for child in node.get("children", [])
+    )

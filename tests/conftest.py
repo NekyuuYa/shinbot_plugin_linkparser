@@ -37,6 +37,16 @@ class MessageElement:
     def img(cls, src: str, **kwargs: object) -> dict[str, object]:
         return {"type": "img", "attrs": {"src": src, **kwargs}, "children": []}
 
+    @classmethod
+    def message(
+        cls, children: list | None = None, **kwargs: object
+    ) -> dict[str, object]:
+        return {"type": "message", "attrs": dict(kwargs), "children": children or []}
+
+    @classmethod
+    def forward(cls, nodes: list) -> dict[str, object]:
+        return {"type": "message", "attrs": {"forward": "true"}, "children": nodes}
+
 
 elements_module.__dict__["MessageElement"] = MessageElement
 sys.modules.setdefault("shinbot", shinbot_module)

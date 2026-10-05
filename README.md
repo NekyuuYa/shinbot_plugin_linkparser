@@ -4,7 +4,9 @@ ShinBot 插件：解析分享内容并回复可消费媒体——
 
 - **Bilibili 视频**（链接 / `BV`/`av` 号 / `b23.tv` 短链 / QQ 分享卡片，含 `?p=N`）→ 下载为可播放 mp4 后直发；
 - **小红书笔记**（`xiaohongshu.com`/`xhslink.com` 链接或分享卡片）→ 图文笔记拼成**一张长图**直发（可改逐张），
-  视频笔记经 HLS 下载后直发（自动压缩）。
+  视频笔记经 HLS 下载后直发（自动压缩）；
+- **X/Twitter 推文**（`x.com`/`twitter.com`/镜像站 `/status/<id>`）→ 文字 + 媒体**折叠成一条聊天记录**（合并转发）
+  发送，两者都不丢；纯文字推文直接回文字；多图默认拼长图，视频选 ≤720P 直链下载后按需压缩。
 
 **默认不解析**。解析档位按会话设置（三档），状态持久化：
 
@@ -51,7 +53,8 @@ curl -X POST http://localhost:3945/api/v1/plugins/shinbot_plugin_linkparser/enab
 https://www.bilibili.com/video/BV1xx411c7mD?p=2
 ```
 
-机器人解析并回复可播放的内容（B站视频；小红书图文→长图 / 视频；视频超过 `max_send_mb` 会自动压缩后直发，不必上传原画）。
+机器人解析并回复内容（B站视频；小红书图文→长图 / 视频；X 推文文字+媒体→折叠聊天记录）。
+视频超过 `max_send_mb` 会自动压缩后直发，不必上传原画。
 同一会话短时间重复链接不重复解析；
 已下载视频按 `bv号_pN.mp4` 缓存复用（重启后不再重新下载，压缩版本也会缓存），目录按 `cache_max_files` 自动清理；
 发送成功后不删除缓存，若想零留存把 `delete_after_send` 设为 `true`。
@@ -88,6 +91,11 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `xhs_max_images` | `9` | 图文笔记最多取前 N 张 |
 | `xhs_image_mode` | `"long"` | 图文发送方式：`long`=拼一张长图；`raw`=逐张 |
 | `xhs_stitch_max_height` | `12000` | 长图最大高度 px（超限等比缩小） |
+| `x_backend` | `"auto"` | X 数据源：`auto`=官方 syndication 优先、fxtwitter 兜底；或 `syndication`/`fxtwitter` |
+| `x_send_text` | `true` | X 回复包含推文正文与作者 |
+| `x_send_forward` | `true` | X「文字+媒体」折叠为一条聊天记录（合并转发），失败自动降级 |
+| `x_image_mode` | `"long"` | X 多图：`long`=拼长图；`raw`=逐张 |
+| `x_video_max_height` | `720` | X 视频下载最大分辨率（避免拉 4K 原片） |
 
 ## 开发
 

@@ -24,6 +24,7 @@ class LinkCandidate:
             needs a redirect first.
         note_id: Xiaohongshu note id when directly present.
         note_url: Full Xiaohongshu note URL (incl. ``xsec_token``) when known.
+        status_id: X/Twitter status (tweet) id when directly present.
     """
 
     platform: str
@@ -35,6 +36,7 @@ class LinkCandidate:
     short_code: str | None = None
     note_id: str | None = None
     note_url: str | None = None
+    status_id: str | None = None
 
     @property
     def needs_redirect(self) -> bool:
@@ -52,6 +54,10 @@ class LinkCandidate:
         Uses resolved ids when available (short links share the resource of
         their canonical target), otherwise the id found inline.
         """
+        if self.platform == "x":
+            if self.status_id:
+                return f"x:post:{self.status_id}"
+            return f"x:unknown:{self.matched}"
         if self.platform == "xiaohongshu":
             note_id = resolved_note_id or self.note_id
             if note_id:
@@ -91,6 +97,44 @@ class XHSOutcome:
     kind: str  # "video" | "images"
     files: list[object]  # list[pathlib.Path]
     info: XHSNoteInfo
+
+
+@dataclass(slots=True)
+class XTweetInfo:
+    """Parsed X/Twitter post (syndication or fxtwitter shape)."""
+
+    status_id: str
+    url: str
+    text: str
+    author_name: str
+    author_handle: str
+    created_at: str = ""
+    photos: list[str] = field(default_factory=list)
+    video_variants: list[dict] = field(default_factory=list)
+    video_duration: float | None = None
+    cover_url: str | None = None
+
+    @property
+    def display_title(self) -> str:
+        """Return ``author (@handle)`` for captions and fallbacks."""
+        handle = f"(@{self.author_handle})" if self.author_handle else ""
+        return f"{self.author_name} {handle}".strip() or "X 推文"
+
+    @property
+    def caption(self) -> str:
+        """Return the folded/text caption: author line plus tweet text."""
+        head = self.display_title
+        body = self.text.strip()
+        return f"{head}\n{body}" if body else head
+
+
+@dataclass(slots=True)
+class XOutcome:
+    """Result of parsing an X/Twitter post."""
+
+    kind: str  # "video" | "images" | "text"
+    files: list[object]  # list[pathlib.Path]
+    info: XTweetInfo
 
 
 @dataclass(slots=True)

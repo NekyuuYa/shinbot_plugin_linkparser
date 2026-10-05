@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import shutil
 from pathlib import Path
 
 import httpx
 
+from ..ffmpeg_media import download_hls_with_ffmpeg, ffmpeg_available
 from .client import REFERER, USER_AGENT, XHSError
 
 logger = logging.getLogger("shinbot_plugin_linkparser.xhs.media")
@@ -88,48 +87,9 @@ async def download_hls_video(
     Raises:
         XHSError: When ffmpeg is missing.
     """
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
+    if not ffmpeg_available():
         raise XHSError("下载小红书视频需要 ffmpeg，当前环境未安装。")
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    partial = dest.with_name(f"{dest.name}.part")
-    headers = f"Referer: {REFERER}\r\nUser-Agent: {USER_AGENT}\r\n"
+    headers = {"Referer": REFERER, "User-Agent": USER_AGENT}
     if cookie:
-        headers += f"Cookie: {cookie}\r\n"
-    command = [
-        ffmpeg,
-        "-nostdin",
-        "-y",
-        "-loglevel",
-        "error",
-        "-headers",
-        headers,
-        "-i",
-        master_url,
-        "-c",
-        "copy",
-        str(partial),
-    ]
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await process.communicate()
-        if process.returncode != 0:
-            logger.warning(
-                "xhs HLS download failed: %s", stderr.decode(errors="ignore")[:500]
-            )
-            partial.unlink(missing_ok=True)
-            return False
-        if not partial.is_file() or partial.stat().st_size <= 0:
-            partial.unlink(missing_ok=True)
-            return False
-        partial.replace(dest)
-        return True
-    except (OSError, asyncio.CancelledError):
-        partial.unlink(missing_ok=True)
-        if asyncio.current_task() is not None and asyncio.current_task().cancelling():
-            raise
-        return False
+        headers["Cookie"] = cookie
+    return await download_hls_with_ffmpeg(master_url, dest, headers=headers)

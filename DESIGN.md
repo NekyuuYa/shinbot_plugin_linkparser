@@ -1,8 +1,9 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**v0.4.0**（136 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频**。
-> 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图。
-> 真实端到端验证过：B站 HTML5/DASH 下载、压缩、QQ 分享卡片（双重编码）→ BV 解析。
+> 状态：**v0.5.0**（168 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
+> 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图；
+> X 的「文字+媒体」默认折叠为一条聊天记录（合并转发）。真实端到端验证：B站（HTML5/DASH/压缩/卡片）、
+> X（官方 syndication + fxtwitter 兜底、图片与 mp4 下载）、小红书（HTML 解析/图片/长图/HLS）。
 
 ---
 
@@ -14,8 +15,11 @@
 ### 1.1 范围与行为（已与需求方确认）
 
 - **Bilibili 视频**：`BV`/`av`、`bilibili.com/video?p=N`、`b23.tv`、`bmBV...`、QQ 分享卡片 → 视频直发。
-- **小红书**：`xiaohongshu.com/(explore|discovery/item)/<id>`（含 `xsec_token`）、`xhslink.com/.cn`
-  短链、QQ 分享卡片 → 图文笔记默认**拼接一张长图**直发（可逐张），视频笔记 HLS 下载直发。
+- **小红书**：`xiaohongshu.com/(explore|discovery/item)/<id>`（含 `xsec_token`）、`xhslink.com/.cn` 短链、
+  QQ 分享卡片 → 图文笔记默认**拼接一张长图**直发（可逐张），视频笔记 HLS 下载直发。
+- **X/Twitter**：`x.com`/`twitter.com`（含 `mobile.`、`/i/status`、`/i/web/status`、legacy `/statuses/`）、
+  镜像站 `fxtwitter/vxtwitter/fixupx/fixvx/twittpr` 的 `/status/<id>` → 文字+媒体**折叠聊天记录**；
+  纯文字推文回文字；多图默认长图；视频选 ≤`x_video_max_height` 的 mp4 变体后按需压缩。
 - **三档**（会话级 `/parser`，全局 `default_mode` 兜底，默认 `off`）：
   - `off`：不解析。
   - `at`：仅当消息 @本机器人；解析对象 = 消息自身 +（@消息引用回复时）被引消息内容。
@@ -25,7 +29,7 @@
 
 ### 1.2 Roadmap 未做项
 
-RenderKit 封面信息卡、B站扫码登录、i18n、更多平台、图文"原图无水印"细节调优。
+RenderKit 封面信息卡、B站扫码登录、i18n、更多平台、X 线程（thread）合并、小红书原图去水印调优。
 
 ---
 
@@ -34,40 +38,53 @@ RenderKit 封面信息卡、B站扫码登录、i18n、更多平台、图文"原�
 - **B站**：`bilibili-api-python`（`Video.get_info()`、`get_download_url`，WBI 签名内置）。实测：匿名
   `html5=True` → 单文件 mp4（最高约 1080P）为默认路径；DASH 匿名仅 480P 需 ffmpeg 合并；CDN 需 Referer。
 - **小红书**：无开放 API；抓笔记页 SSR 的 `window.__INITIAL_STATE__=…</script>`（`undefined`→`null`）：
-  - explore 布局：`note.noteDetailMap[id].note` → type/title/desc/user/imageList[].urlDefault、
-    `video.media.stream.h265|h264|av1|h266[0].masterUrl`（HLS）。
-  - discovery 布局：`noteData.data.noteData`（图含水印）+ `normalNotePreloadData`（干净封面）。
-  - 需浏览器 UA + HTML Accept + Referer；风控时配 `xiaohongshu_cookie`（a1/web_session 等）重试。
-  - 视频 HLS 用 ffmpeg `-headers`（带 Referer/UA/cookie）取流 `-c copy` 合并。
+  explore（`note.noteDetailMap[id].note`）与 discovery（`noteData.data.noteData` + `normalNotePreloadData`）两种布局；
+  图片 `imageList`、视频 `video.media.stream.h265|h264|av1|h266[0].masterUrl`（HLS）。
+  需浏览器 UA + Referer；风控时配 `xiaohongshu_cookie`。
+- **X/Twitter**（两条免登录通道，实测本机可用）：
+  - **官方 syndication** `cdn.syndication.twimg.com/tweet-result?id=<id>&lang=en&token=…`：返回
+    `text`/`user{name,screen_name}`/`created_at`/`mediaDetails[]`；视频含 `video_info.variants`
+    （HLS + 多档 **直链 mp4** 480P–4K，URL 内含 `/1280x720/` 尺寸）与 `duration_millis`。
+  - **fxtwitter** `api.fxtwitter.com/i/status/<id>`：`tweet.author/text/media.photos|videos`，
+    视频给直链 mp4 + `duration` + `thumbnail_url`；作为官方接口限流/失败时的兜底。
+  - vxtwitter 被 Cloudflare 拦截（实测 403），故不采用；oEmbed 仅文本，未采用。
 
 ## 3. 架构（模块）
 
 ```text
 shinbot_plugin_linkparser/
-├── __init__.py      # setup：双 client（bili/xhs）+ state/debouncer/matcher + 路由/指令；泛化发送
-├── models.py        # LinkCandidate(platform/kind/bvid/note_id/note_url…)、VideoMeta、XHSNoteInfo、outcomes
-├── urls.py          # B站+卡片、xhslink/xiaohongshu 扫描、ark 双重解码挖链、supported 收集器、quote 工具
+├── __init__.py      # setup：三 client（bili/xhs/x）+ state/debouncer/matcher + 路由/指令；泛化发送（含折叠转发）
+├── models.py        # LinkCandidate(platform/kind/bvid/note_id/note_url/status_id)、VideoMeta、XHSNoteInfo、XTweetInfo、*Outcome
+├── urls.py          # B站/卡片、xhslink/xiaohongshu、x/twitter/镜像 status 扫描；ark 双重解码挖链；supported 收集器；quote 工具
 ├── parse_policy.py  # 三档判定 + 可见@检测 + quote 解析器 + message_logs 引用读取（纯逻辑）
 ├── matcher.py       # NORMAL matcher：mode + 精确引用核实（DB 同步）
 ├── session_state.py # 会话档位持久化（default_mode；旧格式迁移）
 ├── debounce.py      # 会话级防抖
-├── parsers.py       # parse_video(bili) / parse_xhs_note(xhs) 编排 + 压缩 + 缓存
-├── bilibili/        # client（bilibili-api 封装）/ download（httpx+ffmpeg 合并+压缩+ffprobe）
-└── xiaohongshu/     # client（页面解析/短链/错误）/ media（图+HLS）/ stitch（Pillow 长图）
+├── parsers.py       # parse_video(bili) / parse_xhs_note(xhs) / parse_x_post(x) 编排 + 压缩 + 缓存
+├── imagestitch.py   # 共享长图拼接（Pillow）：等比限宽 + 总高上限整体缩放
+├── ffmpeg_media.py  # 共享 HLS→mp4（ffmpeg -headers -c copy）
+├── bilibili/        # client（bilibili-api 封装）/ download（httpx + 合并 + 压缩 + ffprobe）
+├── xiaohongshu/     # client（页面解析/短链/错误）/ media（图 + HLS）/ stitch（兼容 shim）
+└── twitter/         # client（syndication + fxtwitter + 变体选择）/ media（图 + mp4/HLS）
 ```
 
 判定链路：matcher（同 policy）命中 → handler 取 `parse_candidates_for` 首个 candidate →
-按 `platform` 分发解析 → 产出本地文件 → 按 kind（video 单文件 / images 多图或长图）组 MessageElement 发送；
-失败均走 `_safe_send` 文本兜底、绝不外抛；成功记资源级防抖，`delete_after_send` 可选即删。
+按 `platform` 分发解析 → 产出本地文件 → 发送（X 优先折叠聊天记录）→ 失败 `_safe_send` 文本兜底、
+绝不外抛；成功记资源级防抖，`delete_after_send` 可选即删。
 
 ## 4. 关键决策
 
-- **小红书长图**：`xhs_image_mode=long`（默认）用 Pillow 等比缩放逐图拼接（限 `xhs_stitch_max_height`，
-  超限整体缩小）→ 单图直发；Pillow 缺失或 `raw` 才逐张。省消息资源、防刷屏。
-- **压缩**：`max_send_mb`（默认 50MB）为直发目标；B站用 meta 时长、xhs 用 ffprobe 时长反推码率
+- **X 折叠聊天记录**：用 ShinBot `MessageElement.forward(nodes)`（type=message、`forward=true`）→ OneBot
+  `send_group_forward_msg`/`send_private_forward_msg`；节点内可放 text/img/video。优先「文字节点 + 媒体节点」一条卡片；
+  适配器不支持（非 OneBot 类）或发送失败 → 降级「文字一条 + 媒体一条」；纯文字推文直接回文字。
+- **X 不拉原画**：`pick_video_variant` 优先「≤`x_video_max_height` 的最高档 mp4」，全部超限则取最小档（省流量），
+  无 mp4 才用 HLS（ffmpeg）；仍超 `max_send_mb` 再压缩。图片统一取 `?name=large`（原图 5568px 无必要）。
+- **长图**：`image_mode=long`（小红书 `xhs_image_mode`、X `x_image_mode`）用 Pillow 等比缩放逐图拼接，
+  限总高 `*_stitch_max_height`（超限整体缩小）→ 单图直发；Pillow 缺失或 `raw` 才逐张。
+- **压缩**：`max_send_mb`（默认 50MB）为直发目标；B站用 meta 时长、xhs/x 用 ffprobe 或接口时长反推码率
   （libx264+AAC、`compress_max_height` 限高）。ffmpeg 缺失 → 链接文本 + 提示。
 - **引用解析**：OneBot `reply` 只带 id → `message_logs.get_by_platform_msg_id` 取 `content_json`
-  （MessageElement AST 数组）→ 复用 supported 扫描（文本/卡片/bili/xhs 通吃）。
+  （MessageElement AST 数组）→ 复用 supported 扫描（文本/卡片/bili/xhs/x 通吃）。
 - **卡片**：OneBot/QQ 官方 `json/miniapp/ark` → `sb:ark`；适配器双重编码 + `\/` 转义 → 重复解码 + 字段 + 递归兜底。
 
 ## 5. 配置与指令（定稿）
@@ -80,6 +97,8 @@ max_send_mb=50; compress=True; compress_max_height=720
 debounce_seconds=300; cache_max_files=50; delete_after_send=False
 xiaohongshu_cookie=""; xhs_max_images=9
 xhs_image_mode="long"; xhs_stitch_max_height=12000
+x_backend="auto"; x_send_text=True; x_send_forward=True
+x_image_mode="long"; x_video_max_height=720
 ```
 
 指令 `/parser off|at|always|status`（`on`=always；权限 `cmd.linkparser`，admin/owner 默认）。
@@ -88,13 +107,14 @@ xhs_image_mode="long"; xhs_stitch_max_height=12000
 
 - 仓库 `NekyuuYa/shinbot_plugin_linkparser` + 市场索引 `NekyuuYa/shinbot-plugins`；发版纪律：
   ruff+pytest → bump metadata/pyproject → 推送插件 → 索引 "Bump … to x.y.z"。
-- 依赖：bilibili-api-python、httpx、pydantic、**pillow**（长图）；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
-- 测试 136 项全离线：urls（bili/xhs/卡片/边界）、policy/matcher（三档+@+引用+DB）、session_state、
-  debounce、parsers/handler（分发/超时/断连/超限/长图 kind）、bilibili client、download/compress
-  （真实 ffmpeg）、xiaohongshu（扫描/HTML 布局解析/stitch）、plugin_entry、packaging。
+- 依赖：bilibili-api-python、httpx、pydantic、**pillow**；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
+- 测试 168 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
+  session_state、debounce、parsers/handler（分发/超时/断连/超限/长图/X 折叠与降级/纯文字）、bilibili client、
+  download/compress（真实 ffmpeg）、xiaohongshu（扫描/HTML/stitch）、twitter（扫描/双通道解析/选档/后端降级/下载）、
+  plugin_entry、packaging。
 
 ## 7. Roadmap
 
-- **已实现（0.4.x）**：B站视频 + 小红书图文(长图)/视频、三档会话策略、精确 matcher、压缩、防抖、卡片、
-  引用解析、失败链路加固、真实卡片回归。
-- **Next**：RenderKit 信息卡、扫码登录态（B站）、i18n、多平台、图文原图与去水印策略调优。
+- **已实现（0.5.x）**：B站视频、小红书图文(长图)/视频、X 推文(折叠聊天记录/长图/视频)、三档会话策略、
+  精确 matcher、压缩、防抖、卡片、引用解析、失败链路加固、真实接口端到端验证。
+- **Next**：RenderKit 信息卡、扫码登录态（B站）、i18n、更多平台、X 线程合并、图文原图与去水印策略。

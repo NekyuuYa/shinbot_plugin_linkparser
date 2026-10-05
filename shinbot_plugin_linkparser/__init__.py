@@ -139,6 +139,34 @@ class LinkParserPluginConfig(BaseModel):
         le=60000,
         description="长图拼接最大高度（px），超限会整体等比缩小。",
     )
+    x_backend: Literal["auto", "syndication", "fxtwitter"] = Field(
+        default="auto",
+        description=(
+            "X/Twitter 数据源：auto=官方 syndication 优先、fxtwitter 兜底；"
+            "也可固定为其中之一。"
+        ),
+    )
+    x_send_text: bool = Field(
+        default=True,
+        description="X 推文回复中包含正文与作者信息。",
+    )
+    x_send_forward: bool = Field(
+        default=True,
+        description=(
+            "X 的「文字+媒体」折叠为一条聊天记录（合并转发）发送，两者都不丢；"
+            "适配器不支持或发送失败时自动降级为分别发送。"
+        ),
+    )
+    x_image_mode: Literal["long", "raw"] = Field(
+        default="long",
+        description="X 多图：long=拼成一张长图；raw=逐张发送。",
+    )
+    x_video_max_height: int = Field(
+        default=720,
+        ge=144,
+        le=2160,
+        description="X 视频下载的最大分辨率（避免直接拉 4K 原片）。",
+    )
 
 
 __plugin_config_class__ = LinkParserPluginConfig
@@ -148,6 +176,11 @@ _client_global: Any | None = None
 
 _xhs_client_global: Any | None = None
 """Shared Xiaohongshu client kept for teardown; replaced on every setup()."""
+
+_x_client_global: Any | None = None
+"""Shared X/Twitter client kept for teardown; replaced on every setup()."""
+
+_FORWARD_NAME = "LinkParser"
 
 _USAGE_TEXT = (
     "/parser off|at|always|status —— "
@@ -191,7 +224,7 @@ def setup(plg: Plugin) -> None:
     Framework and third-party imports happen here (not at module import time)
     so the package stays importable in plain unit tests.
     """
-    global _client_global, _xhs_client_global
+    global _client_global, _xhs_client_global, _x_client_global
 
     from shinbot.core.dispatch.routing import RouteCondition, RouteMatchMode
 
@@ -200,6 +233,7 @@ def setup(plg: Plugin) -> None:
     from .matcher import build_link_matcher
     from .parsers import prune_video_cache
     from .session_state import SessionStateStore
+    from .twitter import XClient
     from .xiaohongshu import XHSClient
 
     config = _load_plugin_config(plg.plugin_id)
@@ -212,6 +246,8 @@ def setup(plg: Plugin) -> None:
     _client_global = client
     xhs_client = XHSClient(cookie=config.xiaohongshu_cookie, logger=plg.logger)
     _xhs_client_global = xhs_client
+    x_client = XClient(backend=config.x_backend, logger=plg.logger)
+    _x_client_global = x_client
     debouncer = Debouncer(config.debounce_seconds)
     matcher = build_link_matcher(
         enabled=config.enabled,
@@ -237,7 +273,7 @@ def setup(plg: Plugin) -> None:
     )
     async def linkparser_route(context: Any, _rule: Any) -> None:
         await _handle_message(
-            plg, config, state, client, xhs_client, debouncer, context
+            plg, config, state, client, xhs_client, x_client, debouncer, context
         )
 
     @plg.on_command(
@@ -251,9 +287,10 @@ def setup(plg: Plugin) -> None:
         await _handle_parser_command(ctx, args, state=state, logger=plg.logger)
 
     plg.logger.info(
-        "LinkParser loaded (bilibili+xhs; default_mode=%s, parse_reply=%s)",
+        "LinkParser loaded (bilibili+xhs+x; default_mode=%s, parse_reply=%s, x_backend=%s)",
         config.default_mode,
         config.parse_reply,
+        config.x_backend,
     )
 
 
@@ -290,12 +327,70 @@ async def _handle_parser_command(
         await ctx.send(_USAGE_TEXT)
 
 
+def _supports_forward(message_context: Any) -> bool:
+    """Return True when the session adapter supports folded (forward) sends."""
+    adapter = getattr(message_context, "adapter", None)
+    candidates = {
+        str(getattr(adapter, "platform", "") or "").lower(),
+        str(getattr(message_context, "platform", "") or "").lower(),
+    }
+    if candidates & {"onebot_v11", "onebot", "qq"}:
+        return True
+    adapter_type = type(adapter)
+    return (
+        "onebot" in adapter_type.__name__.lower()
+        or "shinbot_adapter_onebot_v11" in adapter_type.__module__.lower()
+    )
+
+
+async def _send_folded(
+    message_context: Any,
+    caption: str,
+    files: list[Path],
+    is_video: bool,
+    logger: Any,
+) -> bool:
+    """Send caption + media as one collapsed chat-record (forward) message.
+
+    Returns False when the adapter rejects the folded send so the caller can
+    fall back to separate text/media messages.
+    """
+    try:
+        from shinbot.schema.elements import MessageElement
+
+        nodes = []
+        if caption:
+            nodes.append(
+                MessageElement.message(
+                    [MessageElement.text(caption)], nickname=_FORWARD_NAME
+                )
+            )
+        media = [
+            MessageElement.video(str(path)) if is_video else MessageElement.img(str(path))
+            for path in files
+        ]
+        if media:
+            nodes.append(MessageElement.message(media, nickname=_FORWARD_NAME))
+        if not nodes:
+            return False
+        await message_context.send([MessageElement.forward(nodes)])
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "LinkParser folded send failed (%s): %s", type(exc).__name__, exc
+        )
+        return False
+
+
 async def _handle_message(
     plg: Plugin,
     config: LinkParserPluginConfig,
     state: Any,
     client: Any,
     xhs_client: Any,
+    x_client: Any,
     debouncer: Any,
     context: Any,
 ) -> None:
@@ -304,7 +399,8 @@ async def _handle_message(
 
     from .bilibili import BilibiliError, ffmpeg_available
     from .parse_policy import make_db_quote_resolver, parse_candidates_for, visible_mentions_bot
-    from .parsers import delete_cached_file, parse_video, parse_xhs_note
+    from .parsers import delete_cached_file, parse_video, parse_x_post, parse_xhs_note
+    from .twitter import XError
     from .xiaohongshu import XHSError
 
     message_context = context.require_message_context()
@@ -337,6 +433,7 @@ async def _handle_message(
     files: list[Path] = []
     title = "视频"
     page_url = ""
+    caption: str | None = None
     resolved_resource: str | None = None
 
     try:
@@ -357,6 +454,26 @@ async def _handle_message(
             title = outcome.info.display_title or "小红书笔记"
             page_url = outcome.info.page_url
             resolved_resource = f"xiaohongshu:post:{outcome.info.note_id}"
+        elif candidate.platform == "x":
+            outcome = await parse_x_post(
+                x_client,
+                candidate,
+                data_dir=Path(plg.data_dir),
+                image_mode=config.x_image_mode,
+                stitch_max_height=config.xhs_stitch_max_height,
+                video_max_height=config.x_video_max_height,
+                max_size_mb=config.max_size_mb,
+                max_send_mb=config.max_send_mb,
+                compress=config.compress,
+                compress_max_height=config.compress_max_height,
+            )
+            files = [Path(path) for path in outcome.files]
+            is_video = outcome.kind == "video"
+            title = outcome.info.display_title or "X 推文"
+            page_url = outcome.info.url
+            resolved_resource = f"x:post:{outcome.info.status_id}"
+            if config.x_send_text:
+                caption = outcome.info.caption
         else:
             outcome = await parse_video(
                 client,
@@ -382,7 +499,7 @@ async def _handle_message(
         raise
     except Exception as exc:
         debouncer.forget(session_id, link_key)
-        if isinstance(exc, (BilibiliError, XHSError)):
+        if isinstance(exc, (BilibiliError, XHSError, XError)):
             message = str(exc)
         else:
             plg.logger.exception("LinkParser parse failure")
@@ -391,8 +508,16 @@ async def _handle_message(
         return
 
     # ── reply ─────────────────────────────────────────────────────────
+    if not files:
+        # Text-only post (e.g. a text tweet): reply with the caption.
+        if caption:
+            await _safe_send(message_context, caption, plg.logger, "text-post")
+        if resolved_resource:
+            debouncer.remember(session_id, resolved_resource)
+        return
+
     if is_video:
-        size_mb = _file_size_mb(files[0]) if files else 0
+        size_mb = _file_size_mb(files[0])
         if config.max_send_mb > 0 and size_mb > config.max_send_mb:
             # Still over the send cap after (attempted) compression — reply
             # with a link. Usually ffmpeg is missing or compression disabled.
@@ -401,7 +526,7 @@ async def _handle_message(
                 hint = "\n（安装 ffmpeg 后本插件可自动压缩后直发）"
             plg.logger.info(
                 "LinkParser video %s is %dMB > max_send_mb=%d; text fallback",
-                files[0].name if files else "?",
+                files[0].name,
                 size_mb,
                 config.max_send_mb,
             )
@@ -414,35 +539,44 @@ async def _handle_message(
             debouncer.forget(session_id, link_key)
             return
 
-    elements_payload = []
-    for path in files:
-        if is_video:
-            elements_payload.append(MessageElement.video(str(path)))
-        else:
-            elements_payload.append(MessageElement.img(str(path)))
-
-    try:
-        await message_context.send(elements_payload)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        # Platform send failed (timeout/disconnect/etc.). Never let this
-        # escape: keep the cached files, forget debounce so a re-share can
-        # retry, and attempt an informational text reply if possible.
-        plg.logger.warning(
-            "LinkParser media send failed (%s): %s", type(exc).__name__, exc
+    # Preferred: collapse caption + media into one chat record (OneBot
+    # forward) so neither the text nor the media is lost.
+    sent = False
+    if caption and config.x_send_forward and _supports_forward(message_context):
+        sent = await _send_folded(
+            message_context, caption, files, is_video, plg.logger
         )
-        debouncer.forget(session_id, link_key)
-        if resolved_resource:
-            debouncer.forget(session_id, resolved_resource)
-        if config.fallback_to_text:
-            await _safe_send(
-                message_context,
-                f"{title}\n{page_url}",
-                plg.logger,
-                "send-fallback",
+    if not sent:
+        if caption:
+            await _safe_send(message_context, caption, plg.logger, "post-caption")
+        elements_payload = []
+        for path in files:
+            if is_video:
+                elements_payload.append(MessageElement.video(str(path)))
+            else:
+                elements_payload.append(MessageElement.img(str(path)))
+        try:
+            await message_context.send(elements_payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Platform send failed (timeout/disconnect/etc.). Never let this
+            # escape: keep the cached files, forget debounce so a re-share can
+            # retry, and attempt an informational text reply if possible.
+            plg.logger.warning(
+                "LinkParser media send failed (%s): %s", type(exc).__name__, exc
             )
-        return
+            debouncer.forget(session_id, link_key)
+            if resolved_resource:
+                debouncer.forget(session_id, resolved_resource)
+            if config.fallback_to_text:
+                await _safe_send(
+                    message_context,
+                    f"{title}\n{page_url}",
+                    plg.logger,
+                    "send-fallback",
+                )
+            return
 
     # Send succeeded; remember the canonical resource for dedupe (unless the
     # files were deleted right after sending).
@@ -458,10 +592,11 @@ async def _handle_message(
 
 async def on_disable(_plg: Plugin) -> None:
     """Close the shared platform clients when the plugin is disabled."""
-    global _client_global, _xhs_client_global
-    clients = [_client_global, _xhs_client_global]
+    global _client_global, _xhs_client_global, _x_client_global
+    clients = [_client_global, _xhs_client_global, _x_client_global]
     _client_global = None
     _xhs_client_global = None
+    _x_client_global = None
     for client in clients:
         if client is None:
             continue
