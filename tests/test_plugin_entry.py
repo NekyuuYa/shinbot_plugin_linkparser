@@ -260,7 +260,7 @@ def test_config_defaults() -> None:
     assert config.delete_after_send is False
     assert config.cache_max_files == 50
     assert config.x_backend == "auto"
-    assert config.x_send_text is True
-    assert config.x_send_forward is True
+    assert config.send_text is True
+    assert config.send_forward is True
     assert config.x_image_mode == "long"
     assert config.x_video_max_height == 720

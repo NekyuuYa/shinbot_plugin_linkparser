@@ -3,8 +3,8 @@
 ShinBot 插件：解析分享内容并回复可消费媒体——
 
 - **Bilibili 视频**（链接 / `BV`/`av` 号 / `b23.tv` 短链 / QQ 分享卡片，含 `?p=N`）→ 下载为可播放 mp4 后直发；
-- **小红书笔记**（`xiaohongshu.com`/`xhslink.com` 链接或分享卡片）→ 图文笔记拼成**一张长图**直发（可改逐张），
-  视频笔记优先直链 mp4 直接下载（HLS 才走 ffmpeg），超限自动压缩；
+- **小红书笔记**（`xiaohongshu.com`/`xhslink.com` 链接或分享卡片）→ 与 X 相同的输出：**「作者/标题/正文 + 媒体」折叠成
+  一条聊天记录**（合并转发）发送；图文默认拼成**一张长图**（可改逐张），视频优先直链 mp4 下载（HLS 才走 ffmpeg）并按需压缩；
 - **X/Twitter 推文**（`x.com`/`twitter.com`/镜像站 `/status/<id>`）→ 文字 + 媒体**折叠成一条聊天记录**（合并转发）
   发送，两者都不丢；纯文字推文直接回文字；多图默认拼长图，视频选 ≤720P 直链下载后按需压缩。
 
@@ -93,8 +93,8 @@ https://www.bilibili.com/video/BV1xx411c7mD?p=2
 | `xhs_stitch_max_height` | `12000` | 长图最大高度 px（超限等比缩小） |
 | `xhs_video_max_height` | `720` | 小红书视频下载最大分辨率（优先直链 mp4，避免大体积原片） |
 | `x_backend` | `"auto"` | X 数据源：`auto`=官方 syndication 优先、fxtwitter 兜底；或 `syndication`/`fxtwitter` |
-| `x_send_text` | `true` | X 回复包含推文正文与作者 |
-| `x_send_forward` | `true` | X「文字+媒体」折叠为一条聊天记录（合并转发），失败自动降级 |
+| `send_text` | `true` | 回复包含文字说明（X 推文正文 / 小红书作者·标题·正文） |
+| `send_forward` | `true` | 「文字+媒体」折叠为一条聊天记录（合并转发，X 与小红书通用），失败自动降级 |
 | `x_image_mode` | `"long"` | X 多图：`long`=拼长图；`raw`=逐张 |
 | `x_video_max_height` | `720` | X 视频下载最大分辨率（避免拉 4K 原片） |
 

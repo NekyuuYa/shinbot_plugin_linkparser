@@ -165,31 +165,22 @@ def test_oversize_video_skips_send_and_replies_link(handler_env, monkeypatch) ->
     assert isinstance(ctx.sent[0], str)
 
 
-def test_xhs_image_note_sends_images(handler_env, monkeypatch, tmp_path) -> None:
-    """Xiaohongshu image-gallery outcome is sent as image elements."""
-    plg, config, state, debouncer, client = handler_env
-    image_path = tmp_path / "note_long.jpg"
-    image_path.write_bytes(b"image-bytes")
-
+def _xhs_outcome(kind: str, files: list, tmp_path):
     from shinbot_plugin_linkparser.models import XHSNoteInfo, XHSOutcome
 
-    async def fake_parse_xhs(*_args, **_kwargs) -> XHSOutcome:
-        return XHSOutcome(
-            kind="images",
-            files=[image_path],
-            info=XHSNoteInfo(
-                note_id="n1",
-                note_type="normal",
-                title="笔记",
-                desc="",
-                author="up",
-                image_urls=[],
-                page_url="https://www.xiaohongshu.com/explore/n1",
-            ),
-        )
+    info = XHSNoteInfo(
+        note_id="n1",
+        note_type="video" if kind == "video" else "normal",
+        title="笔记标题",
+        desc="笔记正文 描述",
+        author="博主",
+        image_urls=[],
+        page_url="https://www.xiaohongshu.com/explore/n1",
+    )
+    return XHSOutcome(kind=kind, files=files, info=info)
 
-    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
 
+def _xhs_context():
     ctx = MessageContext()
     ctx.message = SimpleNamespace(
         elements=[
@@ -200,14 +191,91 @@ def test_xhs_image_note_sends_images(handler_env, monkeypatch, tmp_path) -> None
             }
         ]
     )
+    return ctx
+
+
+def test_xhs_image_note_sends_caption_then_images(handler_env, monkeypatch, tmp_path) -> None:
+    """XHS galleries follow the X layout: caption text plus media."""
+    plg, config, state, debouncer, client = handler_env
+    image_path = tmp_path / "note_long.jpg"
+    image_path.write_bytes(b"image-bytes")
+
+    async def fake_parse_xhs(*_args, **_kwargs):
+        return _xhs_outcome("images", [image_path], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+
+    ctx = _xhs_context()  # forward unsupported → caption then media
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 2
+    assert isinstance(ctx.sent[0], str)
+    assert "博主" in ctx.sent[0] and "笔记标题" in ctx.sent[0]
+    assert ctx.sent[1][0]["type"] == "img"
+    assert debouncer.hit("g:1", "xiaohongshu:post:n1") is True
+
+
+def test_xhs_media_folded_into_chat_record(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    image_path = tmp_path / "note_long2.jpg"
+    image_path.write_bytes(b"image-bytes")
+
+    async def fake_parse_xhs(*_args, **_kwargs):
+        return _xhs_outcome("images", [image_path], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+    ctx = _xhs_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
     _run(plg, config, state, debouncer, client, ctx)
 
     assert len(ctx.sent) == 1
-    payload = ctx.sent[0]
-    assert isinstance(payload, list)
-    assert payload[0]["type"] == "img"
-    resource = "xiaohongshu:post:n1"
-    assert debouncer.hit("g:1", resource) is True
+    root = ctx.sent[0][0]
+    assert root["attrs"].get("forward") == "true"
+    assert any("笔记标题" in str(node) for node in root["children"])
+    assert any(
+        child.get("type") == "img"
+        for node in root["children"]
+        for child in node.get("children", [])
+    )
+
+
+def test_xhs_video_folded_with_caption(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    video = tmp_path / "note_video.mp4"
+    video.write_bytes(b"video")
+
+    async def fake_parse_xhs(*_args, **_kwargs):
+        return _xhs_outcome("video", [video], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+    ctx = _xhs_context()
+    ctx.adapter = SimpleNamespace(platform="onebot_v11")
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    root = ctx.sent[0][0]
+    assert any(
+        child.get("type") == "video"
+        for node in root["children"]
+        for child in node.get("children", [])
+    )
+
+
+def test_caption_can_be_disabled(handler_env, monkeypatch, tmp_path) -> None:
+    plg, config, state, debouncer, client = handler_env
+    config.send_text = False
+    image_path = tmp_path / "note_long3.jpg"
+    image_path.write_bytes(b"image")
+
+    async def fake_parse_xhs(*_args, **_kwargs):
+        return _xhs_outcome("images", [image_path], tmp_path)
+
+    monkeypatch.setattr(parsers, "parse_xhs_note", fake_parse_xhs)
+    ctx = _xhs_context()
+    _run(plg, config, state, debouncer, client, ctx)
+
+    assert len(ctx.sent) == 1
+    assert isinstance(ctx.sent[0], list) and ctx.sent[0][0]["type"] == "img"
 
 
 X_STATUS = "2040059740848283920"

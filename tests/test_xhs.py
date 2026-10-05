@@ -298,3 +298,25 @@ def test_download_note_video_direct_mp4(tmp_path) -> None:
     finally:
         asyncio.run(client.close())
     assert dest.read_bytes() == b"\x00\x00\x00\x18ftypisom"
+
+
+def test_note_caption_includes_author_title_desc() -> None:
+    from shinbot_plugin_linkparser.models import XHSNoteInfo
+
+    info = XHSNoteInfo(
+        note_id="n1",
+        note_type="normal",
+        title="标题",
+        desc="正文",
+        author="博主",
+    )
+    assert info.caption == "博主\n标题\n正文"
+
+
+def test_note_caption_dedupes_title_desc() -> None:
+    from shinbot_plugin_linkparser.models import XHSNoteInfo
+
+    info = XHSNoteInfo(
+        note_id="n1", note_type="normal", title="同款", desc="同款", author="博主"
+    )
+    assert info.caption == "博主\n同款"

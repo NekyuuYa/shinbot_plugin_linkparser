@@ -1,7 +1,7 @@
 {
   "id": "shinbot_plugin_linkparser",
   "name": "LinkParser",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "author": "NekyuuYa",
   "description": "解析 B 站视频 / 小红书图文(长图)与视频 / X 推文(折叠聊天记录) 并回复；默认不解析，/parser 设置 off/at/always。",
   "entry": "shinbot_plugin_linkparser/__init__.py",

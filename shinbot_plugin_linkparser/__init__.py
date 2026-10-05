@@ -152,15 +152,15 @@ class LinkParserPluginConfig(BaseModel):
             "也可固定为其中之一。"
         ),
     )
-    x_send_text: bool = Field(
+    send_text: bool = Field(
         default=True,
-        description="X 推文回复中包含正文与作者信息。",
+        description="回复中包含文字说明（X 推文正文 / 小红书标题正文与作者）。",
     )
-    x_send_forward: bool = Field(
+    send_forward: bool = Field(
         default=True,
         description=(
-            "X 的「文字+媒体」折叠为一条聊天记录（合并转发）发送，两者都不丢；"
-            "适配器不支持或发送失败时自动降级为分别发送。"
+            "「文字+媒体」折叠为一条聊天记录（合并转发）发送，两者都不丢"
+            "（适用 X 与小红书）；适配器不支持或发送失败时自动降级为分别发送。"
         ),
     )
     x_image_mode: Literal["long", "raw"] = Field(
@@ -462,6 +462,8 @@ async def _handle_message(
             title = outcome.info.display_title or "小红书笔记"
             page_url = outcome.info.page_url
             resolved_resource = f"xiaohongshu:post:{outcome.info.note_id}"
+            if config.send_text:
+                caption = outcome.info.caption
         elif candidate.platform == "x":
             outcome = await parse_x_post(
                 x_client,
@@ -480,7 +482,7 @@ async def _handle_message(
             title = outcome.info.display_title or "X 推文"
             page_url = outcome.info.url
             resolved_resource = f"x:post:{outcome.info.status_id}"
-            if config.x_send_text:
+            if config.send_text:
                 caption = outcome.info.caption
         else:
             outcome = await parse_video(
@@ -550,7 +552,7 @@ async def _handle_message(
     # Preferred: collapse caption + media into one chat record (OneBot
     # forward) so neither the text nor the media is lost.
     sent = False
-    if caption and config.x_send_forward and _supports_forward(message_context):
+    if caption and config.send_forward and _supports_forward(message_context):
         sent = await _send_folded(
             message_context, caption, files, is_video, plg.logger
         )

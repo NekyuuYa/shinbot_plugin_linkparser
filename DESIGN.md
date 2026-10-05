@@ -1,6 +1,6 @@
 # ShinBot LinkParser — 设计文档
 
-> 状态：**v0.5.1**（175 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
+> 状态：**v0.5.2**（180 项单测通过、ruff 干净）。平台：**Bilibili 视频** + **小红书图文/视频** + **X/Twitter 推文**。
 > 策略：off/at/always 三档按会话设置；精确 matcher；超限视频 ffmpeg 压缩；图文默认拼长图；
 > X 的「文字+媒体」默认折叠为一条聊天记录（合并转发）。真实端到端验证：B站（HTML5/DASH/压缩/卡片）、
 > X（官方 syndication + fxtwitter 兜底、图片与 mp4 下载）、小红书（HTML 解析/图片/长图/HLS）。
@@ -16,7 +16,8 @@
 
 - **Bilibili 视频**：`BV`/`av`、`bilibili.com/video?p=N`、`b23.tv`、`bmBV...`、QQ 分享卡片 → 视频直发。
 - **小红书**：`xiaohongshu.com/(explore|discovery/item)/<id>`（含 `xsec_token`）、`xhslink.com/.cn` 短链、
-  QQ 分享卡片 → 图文笔记默认**拼接一张长图**直发（可逐张），视频笔记 HLS 下载直发。
+  QQ 分享卡片 → **与 X 相同输出**：「作者/标题/正文 + 媒体」折叠成一条聊天记录；图文默认**拼一张长图**（可逐张），
+  视频优先直链 mp4 下载（HLS 才走 ffmpeg）并按需压缩。
 - **X/Twitter**：`x.com`/`twitter.com`（含 `mobile.`、`/i/status`、`/i/web/status`、legacy `/statuses/`）、
   镜像站 `fxtwitter/vxtwitter/fixupx/fixvx/twittpr` 的 `/status/<id>` → 文字+媒体**折叠聊天记录**；
   纯文字推文回文字；多图默认长图；视频选 ≤`x_video_max_height` 的 mp4 变体后按需压缩。
@@ -74,6 +75,9 @@ shinbot_plugin_linkparser/
 
 ## 4. 关键决策
 
+- **统一「文字+媒体」折叠**：小红书与 X 共用一条发送路径——caption 由各自 info 提供
+  （`XTweetInfo.caption` / `XHSNoteInfo.caption`），`send_text`/`send_forward` 开关与折叠/降级逻辑平台无关；
+  仅 B站保持"只回视频"（无 caption）。命名从 `x_send_text`/`x_send_forward` 去平台化为 `send_text`/`send_forward`。
 - **X 折叠聊天记录**：用 ShinBot `MessageElement.forward(nodes)`（type=message、`forward=true`）→ OneBot
   `send_group_forward_msg`/`send_private_forward_msg`；节点内可放 text/img/video。优先「文字节点 + 媒体节点」一条卡片；
   适配器不支持（非 OneBot 类）或发送失败 → 降级「文字一条 + 媒体一条」；纯文字推文直接回文字。
@@ -100,7 +104,7 @@ max_send_mb=50; compress=True; compress_max_height=720
 debounce_seconds=300; cache_max_files=50; delete_after_send=False
 xiaohongshu_cookie=""; xhs_max_images=9
 xhs_image_mode="long"; xhs_stitch_max_height=12000; xhs_video_max_height=720
-x_backend="auto"; x_send_text=True; x_send_forward=True
+send_text=True; send_forward=True; x_backend="auto"
 x_image_mode="long"; x_video_max_height=720
 ```
 
@@ -111,10 +115,11 @@ x_image_mode="long"; x_video_max_height=720
 - 仓库 `NekyuuYa/shinbot_plugin_linkparser` + 市场索引 `NekyuuYa/shinbot-plugins`；发版纪律：
   ruff+pytest → bump metadata/pyproject → 推送插件 → 索引 "Bump … to x.y.z"。
 - 依赖：bilibili-api-python、httpx、pydantic、**pillow**；ffmpeg/ffprobe 运行期需要（压缩/HLS/合并）。
-- 测试 175 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
+- 测试 180 项全离线（X 用 `httpx.MockTransport`）：urls（bili/xhs/x/卡片/边界）、policy/matcher（三档+@+引用+DB）、
   session_state、debounce、parsers/handler（分发/超时/断连/超限/长图/X 折叠与降级/纯文字）、bilibili client、
   download/compress（真实 ffmpeg）、xiaohongshu（扫描/HTML/stitch）、twitter（扫描/双通道解析/选档/后端降级/下载）、
-  plugin_entry、packaging；XHS 选档/直链下载与 ffmpeg `-f mp4` 回归。
+  plugin_entry、packaging；XHS 选档/直链下载/ffmpeg `-f mp4` 回归；XHS 与 X 一致的
+  caption+媒体折叠（含降级、caption 可关、视频/图文两种 kind）。
   实测端到端：真实小红书视频笔记（720P 直链 18.5MB）下载成功，压缩到 5MB 用时 5s。
 
 ## 7. Roadmap

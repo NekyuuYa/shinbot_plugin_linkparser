@@ -90,6 +90,17 @@ class XHSNoteInfo:
         """Return the note title or a fallback label."""
         return self.title or "小红书笔记"
 
+    @property
+    def caption(self) -> str:
+        """Return the folded/text caption: author, title and note body."""
+        parts = [self.author or "小红书"]
+        if self.title:
+            parts.append(self.title)
+        desc = self.desc.strip()
+        if desc and desc != self.title:
+            parts.append(desc)
+        return "\n".join(parts)
+
 
 @dataclass(slots=True)
 class XHSOutcome:
