@@ -67,6 +67,17 @@ def _height_from_url(url: str) -> int | None:
     return None
 
 
+def _media_available(media: dict) -> bool:
+    """Return False when X reports the media as withheld/unavailable."""
+    availability = media.get("ext_media_availability")
+    if not isinstance(availability, dict):
+        return True
+    status = availability.get("status")
+    if not isinstance(status, str) or not status:
+        return True
+    return status.lower() == "available"
+
+
 def _normalize_variants(variants: list[dict]) -> list[dict]:
     """Normalize raw variant dicts into ``{url, content_type, bitrate, height}``."""
     normalized: list[dict] = []
@@ -136,7 +147,9 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
         if media_type == "photo":
             url = _photo_url(str(media.get("media_url_https") or ""))
             if url:
-                media_items.append(XMedia(kind="photo", url=url))
+                media_items.append(
+                    XMedia(kind="photo", url=url, available=_media_available(media))
+                )
             continue
         if media_type in ("video", "animated_gif"):
             info = media.get("video_info") or {}
@@ -152,6 +165,7 @@ def parse_syndication(data: dict[str, Any], status_id: str) -> XTweetInfo | None
                     variants=_normalize_variants(info.get("variants") or []),
                     duration=duration,
                     cover_url=str(media.get("media_url_https") or "") or None,
+                    available=_media_available(media),
                 )
             )
     return XTweetInfo(

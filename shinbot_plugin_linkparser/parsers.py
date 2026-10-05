@@ -430,7 +430,12 @@ async def parse_x_post(
 
     media: list[MediaItem] = []
     media_failed = False
+    unavailable = 0
     for position, item in enumerate(info.media, start=1):
+        if not item.available:
+            unavailable += 1
+            logger.info("x media %d unavailable/withheld", position)
+            continue
         if item.is_video:
             variants = list(item.variants)
             if pick_video_variant(variants, max_height=video_max_height) is None:
@@ -475,6 +480,8 @@ async def parse_x_post(
             continue
 
     if not media:
+        if unavailable and unavailable == len(info.media):
+            raise XError("该推文的媒体已被 X 限制（敏感或地区限制），无法下载。")
         if info.media or media_failed:
             raise XError("X 推文媒体下载失败（可能受保护或链接已失效）。")
         return XOutcome(kind="text", media=[], info=info)

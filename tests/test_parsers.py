@@ -386,3 +386,42 @@ def test_parse_x_post_mixed_media_keeps_order(tmp_path, monkeypatch) -> None:
     assert [item.kind for item in outcome.media] == ["image", "video", "image"]
     for item in outcome.media:
         assert Path(item.path).exists()
+
+
+def test_parse_x_post_all_media_withheld_raises(tmp_path, monkeypatch) -> None:
+    from shinbot_plugin_linkparser.models import XMedia, XTweetInfo
+    from shinbot_plugin_linkparser.twitter import XError
+
+    info = XTweetInfo(
+        status_id="2040059740848283920",
+        url="https://x.com/i/status/2040059740848283920",
+        text="withheld",
+        author_name="NASA",
+        author_handle="NASA",
+        media=[XMedia(kind="photo", url="https://pbs.twimg.com/a.jpg", available=False)],
+    )
+
+    class FakeXClient:
+        http = object()
+
+        async def fetch_tweet(self, status_id: str) -> XTweetInfo:
+            return info
+
+    from shinbot_plugin_linkparser import twitter as twitter_mod
+
+    async def fake_download_photo(*_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("withheld media must not be downloaded")
+
+    monkeypatch.setattr(twitter_mod, "download_photo", fake_download_photo)
+
+    candidate = LinkCandidate(
+        platform="x",
+        kind="post",
+        matched="https://x.com/NASA/status/2040059740848283920",
+        status_id="2040059740848283920",
+    )
+    with pytest.raises(XError) as excinfo:
+        asyncio.run(
+            parsers.parse_x_post(FakeXClient(), candidate, data_dir=tmp_path, max_send_mb=0)
+        )
+    assert "限制" in str(excinfo.value)

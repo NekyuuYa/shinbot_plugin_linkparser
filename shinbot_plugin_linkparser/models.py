@@ -134,6 +134,8 @@ class XMedia:
         variants: Normalized video variants for video/gif items.
         duration: Video duration in seconds, when known.
         cover_url: Poster/thumbnail URL for video/gif items.
+        available: False when X reports the media as withheld/unavailable
+            (``ext_media_availability.status != "Available"``).
     """
 
     kind: str
@@ -141,6 +143,7 @@ class XMedia:
     variants: list[dict] = field(default_factory=list)
     duration: float | None = None
     cover_url: str | None = None
+    available: bool = True
 
     @property
     def is_video(self) -> bool:

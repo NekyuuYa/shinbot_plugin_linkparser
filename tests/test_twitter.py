@@ -362,3 +362,22 @@ def test_parse_fxtwitter_reads_possibly_sensitive() -> None:
 def test_sensitive_defaults_false() -> None:
     info = parse_syndication(_syndication_payload(), STATUS_ID)
     assert info is not None and info.sensitive is False
+
+
+# ── media availability (withheld / restricted) ────────────────────────────
+
+
+def test_parse_syndication_reads_media_availability() -> None:
+    payload = _syndication_payload()
+    payload["mediaDetails"][0]["ext_media_availability"] = {"status": "Unavailable"}
+    payload["mediaDetails"][1]["ext_media_availability"] = {"status": "Available"}
+    info = parse_syndication(payload, STATUS_ID)
+    assert info is not None
+    assert info.media[0].available is False  # photo withheld
+    assert info.media[1].available is True  # video available
+
+
+def test_media_available_defaults_true_without_field() -> None:
+    info = parse_syndication(_syndication_payload(), STATUS_ID)
+    assert info is not None
+    assert all(item.available for item in info.media)
