@@ -197,3 +197,104 @@ def test_stitch_downscales_when_too_tall(tmp_path) -> None:
 
 def test_stitch_returns_none_without_images(tmp_path) -> None:
     assert stitch_to_long_image([], tmp_path / "x.jpg") is None
+
+
+# ── video variant selection / direct mp4 download ─────────────────────────
+
+
+def _note_with_stream() -> dict:
+    def stream(codec, fmt, url, height, size):
+        return {
+            codec: [
+                {
+                    "format": fmt,
+                    "masterUrl": url,
+                    "width": int(height * 16 / 9),
+                    "height": height,
+                    "size": size,
+                }
+            ]
+        }
+
+    merged: dict = {}
+    merged.update(stream("h265", "hls", "https://v/pl/h265.m3u8", 1080, 40000000))
+    merged.update(
+        stream("h264", "mp4", "https://v/stream/x_258.mp4?sign=abc", 720, 18500902)
+    )
+    merged.update(stream("av1", "mp4", "https://v/stream/y_av1.mp4", 1080, 30000000))
+    return {"video": {"media": {"stream": merged}}}
+
+
+def test_video_variants_of_normalizes_entries() -> None:
+    from shinbot_plugin_linkparser.xiaohongshu import video_variants_of
+
+    variants = video_variants_of(_note_with_stream())
+    assert len(variants) == 3
+    codecs = {variant["codec"] for variant in variants}
+    assert codecs == {"h265", "h264", "av1"}
+    h264 = next(v for v in variants if v["codec"] == "h264")
+    assert h264["format"] == "mp4"
+    assert h264["height"] == 720 and h264["size"] == 18500902
+
+
+def test_pick_xhs_variant_prefers_highest_mp4_within_cap() -> None:
+    from shinbot_plugin_linkparser.xiaohongshu import pick_video_variant, video_variants_of
+
+    variants = video_variants_of(_note_with_stream())
+    chosen = pick_video_variant(variants, max_height=720)
+    assert chosen is not None
+    assert chosen["height"] == 720  # 1080 mp4 rejected, 720 chosen
+    assert chosen["format"] == "mp4"
+
+
+def test_pick_xhs_variant_smallest_when_all_over_cap() -> None:
+    from shinbot_plugin_linkparser.xiaohongshu import pick_video_variant
+
+    variants = [
+        {"url": "https://v/a.mp4", "format": "mp4", "height": 1080, "size": 9},
+        {"url": "https://v/b.mp4", "format": "mp4", "height": 720, "size": 5},
+    ]
+    chosen = pick_video_variant(variants, max_height=480)
+    assert chosen is not None
+    assert chosen["height"] == 720
+
+
+def test_pick_xhs_variant_falls_back_to_hls() -> None:
+    from shinbot_plugin_linkparser.xiaohongshu import pick_video_variant
+
+    variants = [{"url": "https://v/pl/x.m3u8", "format": "hls", "height": 720}]
+    chosen = pick_video_variant(variants, max_height=720)
+    assert chosen is not None and chosen["url"].endswith(".m3u8")
+
+
+def test_pick_xhs_variant_empty() -> None:
+    from shinbot_plugin_linkparser.xiaohongshu import pick_video_variant
+
+    assert pick_video_variant([], max_height=720) is None
+
+
+def test_download_note_video_direct_mp4(tmp_path) -> None:
+    import asyncio
+
+    import httpx
+
+    from shinbot_plugin_linkparser.xiaohongshu import XHSClient
+    from shinbot_plugin_linkparser.xiaohongshu.media import download_note_video
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "sns-video" in request.url.host
+        return httpx.Response(
+            200,
+            content=b"\x00\x00\x00\x18ftypisom",
+            headers={"content-type": "video/mp4"},
+        )
+
+    client = XHSClient(transport=httpx.MockTransport(handler))
+    dest = tmp_path / "v.mp4"
+    try:
+        asyncio.run(
+            download_note_video(client.http, "https://sns-video-v6.xhscdn.com/a.mp4", dest)
+        )
+    finally:
+        asyncio.run(client.close())
+    assert dest.read_bytes() == b"\x00\x00\x00\x18ftypisom"

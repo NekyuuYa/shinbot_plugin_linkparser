@@ -46,7 +46,9 @@ async def download_hls_with_ffmpeg(
     command = [ffmpeg, "-nostdin", "-y", "-loglevel", "error"]
     if header_text:
         command += ["-headers", header_text]
-    command += ["-i", url, "-c", "copy", str(partial)]
+    # NOTE: the partial name ends with ".part", so the muxer must be
+    # forced explicitly (ffmpeg cannot infer a format from the extension).
+    command += ["-i", url, "-c", "copy", "-f", "mp4", str(partial)]
     try:
         process = await asyncio.create_subprocess_exec(
             *command,

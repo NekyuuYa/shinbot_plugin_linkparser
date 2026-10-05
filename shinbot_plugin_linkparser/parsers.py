@@ -232,6 +232,8 @@ async def parse_xhs_note(
     image_mode: str = "long",
     max_images: int = 9,
     stitch_max_height: int = 12000,
+    video_max_height: int = 720,
+    max_size_mb: int = 0,
     max_send_mb: int = 0,
     compress: bool = True,
     compress_max_height: int = 720,
@@ -251,6 +253,8 @@ async def parse_xhs_note(
             to keep individual images.
         max_images: Maximum number of gallery images to fetch.
         stitch_max_height: Height cap for stitched long images.
+        video_max_height: Preferred maximum video height (progressive mp4).
+        max_size_mb: Download size cap in MB (0 disables).
         max_send_mb: Send size cap for video notes (0 disables compression).
         compress: Allow compression toward the send cap.
         compress_max_height: Max height for compressed video.
@@ -267,6 +271,8 @@ async def parse_xhs_note(
         XHSError,
         download_hls_video,
         download_note_image,
+        download_note_video,
+        pick_video_variant,
         stitch_to_long_image,
     )
 
@@ -290,15 +296,32 @@ async def parse_xhs_note(
     note_key = info.note_id or resolved.note_id or "note"
 
     if info.note_type == "video":
-        if not info.video_master_url:
+        variants = list(info.video_variants)
+        if not variants and info.video_master_url:
+            variants = [{"url": info.video_master_url, "format": "", "height": None}]
+        chosen = pick_video_variant(variants, max_height=video_max_height)
+        if chosen is None or not chosen.get("url"):
             raise XHSError("该视频笔记暂无可用的播放流（可能已删除或需登录）。")
         dest = base_dir / f"{note_key}_video.mp4"
         if not _reusable_video(dest):
-            downloaded = await download_hls_video(
-                info.video_master_url, dest, cookie=xhs_client.cookie
+            video_url = str(chosen["url"])
+            is_mp4 = chosen.get("format") == "mp4" or (
+                video_url.split("?")[0].endswith(".mp4")
             )
-            if not downloaded:
-                raise XHSError("小红书视频下载失败（可能受保护或 ffmpeg 缺失）。")
+            if is_mp4:
+                # Progressive mp4 (most Xiaohongshu videos): plain HTTP download.
+                await download_note_video(
+                    xhs_client.http,
+                    video_url,
+                    dest,
+                    max_bytes=max_size_mb * 1024 * 1024,
+                )
+            else:
+                downloaded = await download_hls_video(
+                    video_url, dest, cookie=xhs_client.cookie
+                )
+                if not downloaded:
+                    raise XHSError("小红书视频下载失败（可能受保护或 ffmpeg 缺失）。")
         if max_send_mb > 0 and compress and _file_size_mb(dest) > max_send_mb:
             duration = await probe_duration_seconds(dest)
             if duration and duration > 0:

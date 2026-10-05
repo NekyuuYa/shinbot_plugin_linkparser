@@ -65,6 +65,59 @@ async def download_note_image(
         raise XHSError("图片网络下载失败，请稍后再试。") from exc
 
 
+async def download_note_video(
+    http: httpx.AsyncClient,
+    url: str,
+    dest: Path,
+    *,
+    max_bytes: int = 0,
+) -> None:
+    """Download a progressive mp4 note video with XHS referer/UA headers.
+
+    Many Xiaohongshu video notes expose direct mp4 ``masterUrl`` streams; those
+    are streamed here instead of going through ffmpeg.
+
+    Args:
+        http: Shared HTTP client.
+        url: Signed mp4 URL.
+        dest: Destination file path.
+        max_bytes: Optional size cap (0 disables).
+
+    Raises:
+        XHSError: On HTTP failure or oversize.
+    """
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": REFERER,
+        "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+    }
+    try:
+        async with http.stream("GET", url, headers=headers) as response:
+            if response.status_code != 200:
+                raise XHSError(f"视频下载失败（HTTP {response.status_code}）。")
+            content_length = int(response.headers.get("content-length") or 0)
+            if max_bytes > 0 and content_length > max_bytes:
+                raise XHSError(f"视频体积超过上限（{max_bytes // (1024 * 1024)}MB）。")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            partial = dest.with_name(f"{dest.name}.part")
+            total = 0
+            try:
+                with open(partial, "wb") as file_obj:
+                    async for chunk in response.aiter_bytes(_CHUNK_BYTES):
+                        total += len(chunk)
+                        if max_bytes > 0 and total > max_bytes:
+                            raise XHSError(
+                                f"视频体积超过上限（{max_bytes // (1024 * 1024)}MB）。"
+                            )
+                        file_obj.write(chunk)
+            except BaseException:
+                partial.unlink(missing_ok=True)
+                raise
+            partial.replace(dest)
+    except httpx.HTTPError as exc:
+        raise XHSError("视频网络下载失败，请稍后再试。") from exc
+
+
 async def download_hls_video(
     master_url: str,
     dest: Path,

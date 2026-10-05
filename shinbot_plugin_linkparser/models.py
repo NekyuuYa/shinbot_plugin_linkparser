@@ -82,6 +82,7 @@ class XHSNoteInfo:
     author: str
     image_urls: list[str] = field(default_factory=list)
     video_master_url: str | None = None
+    video_variants: list[dict] = field(default_factory=list)
     page_url: str = ""
 
     @property

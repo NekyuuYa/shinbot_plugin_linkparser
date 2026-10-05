@@ -139,6 +139,12 @@ class LinkParserPluginConfig(BaseModel):
         le=60000,
         description="长图拼接最大高度（px），超限会整体等比缩小。",
     )
+    xhs_video_max_height: int = Field(
+        default=720,
+        ge=144,
+        le=2160,
+        description="小红书视频下载的最大分辨率（优先直链 mp4，避免大体积原片）。",
+    )
     x_backend: Literal["auto", "syndication", "fxtwitter"] = Field(
         default="auto",
         description=(
@@ -445,6 +451,8 @@ async def _handle_message(
                 image_mode=config.xhs_image_mode,
                 max_images=config.xhs_max_images,
                 stitch_max_height=config.xhs_stitch_max_height,
+                video_max_height=config.xhs_video_max_height,
+                max_size_mb=config.max_size_mb,
                 max_send_mb=config.max_send_mb,
                 compress=config.compress,
                 compress_max_height=config.compress_max_height,

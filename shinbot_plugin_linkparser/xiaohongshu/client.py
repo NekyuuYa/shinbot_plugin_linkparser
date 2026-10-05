@@ -79,6 +79,93 @@ def _author_name(note: dict[str, Any]) -> str:
     return str(user.get("nickname") or user.get("nickName") or "")
 
 
+def _safe_int(value: Any) -> int | None:
+    """Best-effort int conversion (None on failure)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def video_variants_of(note: dict[str, Any]) -> list[dict]:
+    """Collect normalized video variants from a note's media stream.
+
+    Xiaohongshu exposes per-codec stream lists (h265/h264/av1/h266); each entry
+    carries ``masterUrl`` plus ``format``/``size``/``width``/``height``. Many
+    entries are progressive mp4 (``format == "mp4"``) rather than HLS.
+
+    Returns:
+        Variant dicts ``{url, format, height, width, size, codec}``.
+    """
+    media = _get(note, "video", "media") or {}
+    stream = media.get("stream") if isinstance(media, dict) else None
+    if not isinstance(stream, dict):
+        return []
+    variants: list[dict] = []
+    for codec in ("h265", "h264", "av1", "h266"):
+        items = stream.get(codec)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = item.get("masterUrl")
+            if not isinstance(url, str) or not url:
+                continue
+            variants.append(
+                {
+                    "url": url,
+                    "format": str(item.get("format") or "").lower(),
+                    "height": _safe_int(item.get("height")),
+                    "width": _safe_int(item.get("width")),
+                    "size": _safe_int(item.get("size")),
+                    "codec": codec,
+                }
+            )
+    return variants
+
+
+def pick_video_variant(
+    variants: list[dict],
+    *,
+    max_height: int = 720,
+) -> dict | None:
+    """Pick a Xiaohongshu video variant, preferring progressive mp4.
+
+    Selection order: highest-height mp4 variant not exceeding *max_height*;
+    otherwise the smallest mp4 (least bandwidth); otherwise the first HLS
+    variant (downloaded via ffmpeg).
+
+    Args:
+        variants: Normalized variants from :func:`video_variants_of`.
+        max_height: Preferred maximum video height in pixels.
+
+    Returns:
+        The chosen variant dict, or None when nothing is playable.
+    """
+    if not variants:
+        return None
+    mp4 = [
+        variant
+        for variant in variants
+        if variant.get("format") == "mp4"
+        or str(variant.get("url") or "").split("?")[0].endswith(".mp4")
+    ]
+    if mp4:
+        within = [
+            variant
+            for variant in mp4
+            if variant.get("height") and variant["height"] <= max_height
+        ]
+        if within:
+            return max(within, key=lambda variant: variant["height"])
+        sized = [variant for variant in mp4 if variant.get("height")]
+        if sized:
+            return min(sized, key=lambda variant: variant["height"])
+        return mp4[0]
+    return variants[0]
+
+
 def _image_urls(note: dict[str, Any], key_names: tuple[str, ...]) -> list[str]:
     """Collect image urls for the chosen field names."""
     urls: list[str] = []
@@ -168,6 +255,7 @@ def _build_info(
         author=_author_name(note),
         image_urls=image_urls,
         video_master_url=_pick_video_master(note),
+        video_variants=video_variants_of(note),
         page_url=page_url,
     )
 
@@ -181,7 +269,13 @@ class XHSClient:
         logger: Optional logger; defaults to a module logger.
     """
 
-    def __init__(self, *, cookie: str = "", logger: logging.Logger | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cookie: str = "",
+        logger: logging.Logger | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
         self._cookie = cookie or ""
         self.logger = logger or logging.getLogger("shinbot_plugin_linkparser.xhs")
         headers: dict[str, str] = {
@@ -196,6 +290,7 @@ class XHSClient:
             timeout=httpx.Timeout(connect=15.0, read=None, write=60.0, pool=10.0),
             follow_redirects=False,
             headers=headers,
+            transport=transport,
         )
 
     @property
